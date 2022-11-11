@@ -69,7 +69,7 @@ pub async fn get_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str)
         auth,
     );
 
-    let secret_name = format!("projects/{project}/secrets/db-cxn-{db}");
+    let secret_name = format!("projects/{project}/secrets/db-cxn-{db}/versions/latest");
     let (_, s) = hub
         .projects()
         .secrets_versions_access(&secret_name)
@@ -126,16 +126,12 @@ impl Db {
     }
 
     async fn connect_redis(project: &str, sa: &ServiceAccountKey) -> Result<RedisPool> {
-        // if let (Some(pwd), Some(host), Some(port)) = (&c.pwd, &c.host, &c.port) {
         // let cfg = RConf::from_url(format!("redis://:{}@{}:{}", pwd, host, port));
         let cfg = get_redis_conf(project, sa).await?;
 
         let pool = cfg.create_pool(Some(Runtime::Tokio1))?;
 
         Ok(pool)
-        // } else {
-        //     Err(anyhow!("Invalid redis creds"))
-        // }
     }
 
     pub async fn ensure_tenant_db(&self, org: &str) -> Result<()> {
