@@ -1,37 +1,35 @@
-use std::{str::{FromStr}, collections::HashMap, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool, RecyclingMethod};
-use deadpool_redis::{Config as RConf, Connection, Pool as RedisPool, Runtime};use serde_derive::{Serialize, Deserialize};
+use deadpool_redis::{Config as RConf, Connection, Pool as RedisPool, Runtime};
+use google_secretmanager1::{
+    hyper::Client,
+    hyper_rustls,
+    oauth2::{ServiceAccountAuthenticator, ServiceAccountKey},
+    SecretManager,
+};
 use openssl::ssl::{SslConnector, SslMethod};
 use postgres_openssl::MakeTlsConnector;
-use tokio::{try_join, sync::RwLock};
+use tokio::{sync::RwLock, try_join};
 use tokio_postgres::{Config as PgConf, NoTls};
-use google_secretmanager1::{oauth2::{ServiceAccountKey, ServiceAccountAuthenticator}, SecretManager, hyper_rustls, hyper::Client};
 
-
-#[derive(Serialize, Deserialize)]
-pub struct DbConf {
-    pgsql: DbDef,
-    redis: DbDef,
+pub async fn get_pg_conf(
+    project: &str,
+    sa: &ServiceAccountKey,
+    db: &str,
+) -> Result<tokio_postgres::Config> {
+    let cxn = get_cxn_secret(project, sa, db).await?;
+    Ok(PgConf::from_str(
+        cxn.replace("verify-full", "require").as_str(),
+    )?)
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct DbDef {
-    host: Option<String>,
-    port: Option<u16>,
-    user: Option<String>,
-    pwd: Option<String>,
-    cockroach: Option<String>,
-}
-
-pub async fn get_pg_conf(sa: &ServiceAccountKey, db: &str) -> Result<tokio_postgres::Config> {
-    let cxn = get_cxn_secret(sa, db).await?;
-    Ok(PgConf::from_str(cxn.replace("verify-full", "require").as_str())?)
-}
-
-pub async fn get_redis_conf(sa: &ServiceAccountKey) -> Result<deadpool_redis::Config> {
-    let cxn = get_cxn_secret(sa, "cache").await?;
+pub async fn get_redis_conf(
+    project: &str,
+    sa: &ServiceAccountKey,
+) -> Result<deadpool_redis::Config> {
+    let cxn = get_cxn_secret(project, sa, "cache").await?;
     Ok(RConf::from_url(cxn))
 }
 
@@ -55,60 +53,68 @@ pub fn connect_pg(cfg: tokio_postgres::Config, pool_size: usize, isroach: bool) 
 }
 
 // returns the connection string as a secret
-pub async fn get_cxn_secret(secret: &ServiceAccountKey, db: &str) -> Result<String> {
-    let auth = ServiceAccountAuthenticator::builder(secret.clone()).build().await?;
+pub async fn get_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str) -> Result<String> {
+    let auth = ServiceAccountAuthenticator::builder(secret.clone())
+        .build()
+        .await?;
     let hub = SecretManager::new(
-            Client::builder().build(
-                hyper_rustls::HttpsConnectorBuilder::new()
+        Client::builder().build(
+            hyper_rustls::HttpsConnectorBuilder::new()
                 .with_native_roots()
                 .https_or_http()
                 .enable_http1()
                 .enable_http2()
-                .build()), auth);
-    
-    let secret_name = format!("projects/xambit-1/secrets/db-cxn-{db}");
-    let (_, s) = hub.projects().secrets_versions_access(&secret_name).doit().await?;
-    
+                .build(),
+        ),
+        auth,
+    );
+
+    let secret_name = format!("projects/{project}/secrets/db-cxn-{db}");
+    let (_, s) = hub
+        .projects()
+        .secrets_versions_access(&secret_name)
+        .doit()
+        .await?;
+
     let secret = if let Some(pl) = s.payload && let Some(d) = pl.data {
         base64::decode(d.as_bytes())?
     } else {
         return Err(anyhow!("Invalid db credentials"));
     };
 
-
     Ok(String::from_utf8(secret)?)
 }
 
 pub struct Db {
     sa: ServiceAccountKey,
-    // gcs: GClient,
     xai: PgPool,
     orgpg: Arc<RwLock<HashMap<String, PgPool>>>,
     redis: RedisPool,
+    project: String,
 }
 
 impl Db {
-    pub async fn new(sa: ServiceAccountKey) -> Result<Self> {
+    pub async fn new(project: &str, sa: ServiceAccountKey) -> Result<Self> {
         // let gcs = GClient::default();
         // let c = get_db_conf(&gcs, "xai.db").await?;
         let (xai, redis) = try_join!(
-            Self::connect_xai_pg(&sa),
-            Self::connect_redis(&sa)
+            Self::connect_xai_pg(project, &sa),
+            Self::connect_redis(project, &sa)
         )?;
 
         // create client connection for sentry gRPC here and get session from there
         // and return Ok((true, Session))
         Ok(Self {
             sa,
-            // gcs,
             xai,
             orgpg: Arc::new(RwLock::new(HashMap::new())),
             redis,
+            project: project.to_owned(),
         })
     }
 
-    async fn connect_xai_pg(sa: &ServiceAccountKey) -> Result<PgPool> {
-        connect_pg(get_pg_conf(sa, "xai").await?, 4, true)
+    async fn connect_xai_pg(project: &str, sa: &ServiceAccountKey) -> Result<PgPool> {
+        connect_pg(get_pg_conf(project, sa, "xai").await?, 4, true)
     }
 
     pub async fn get_xai_pg(&self) -> Result<Object> {
@@ -119,13 +125,13 @@ impl Db {
         }
     }
 
-    async fn connect_redis(sa: &ServiceAccountKey) -> Result<RedisPool> {
+    async fn connect_redis(project: &str, sa: &ServiceAccountKey) -> Result<RedisPool> {
         // if let (Some(pwd), Some(host), Some(port)) = (&c.pwd, &c.host, &c.port) {
-            // let cfg = RConf::from_url(format!("redis://:{}@{}:{}", pwd, host, port));
-        let cfg = get_redis_conf(sa).await?;
+        // let cfg = RConf::from_url(format!("redis://:{}@{}:{}", pwd, host, port));
+        let cfg = get_redis_conf(project, sa).await?;
 
         let pool = cfg.create_pool(Some(Runtime::Tokio1))?;
-         
+
         Ok(pool)
         // } else {
         //     Err(anyhow!("Invalid redis creds"))
@@ -140,16 +146,16 @@ impl Db {
             }
         }
 
-        let p = Self::connect_tenant_pg(&self.sa, org).await?;
+        let p = Self::connect_tenant_pg(&self.project, &self.sa, org).await?;
         let mut l = self.orgpg.write().await;
         l.insert(org.to_owned(), p);
 
         Ok(())
     }
 
-    async fn connect_tenant_pg(sa: &ServiceAccountKey, org: &str) -> Result<PgPool> {
+    async fn connect_tenant_pg(project: &str, sa: &ServiceAccountKey, org: &str) -> Result<PgPool> {
         let pool = connect_pg(
-            get_pg_conf(sa, org.replace("o-", "db").to_lowercase().as_str()).await?,
+            get_pg_conf(project, sa, org.replace("o-", "db").to_lowercase().as_str()).await?,
             2,
             false,
         )?;

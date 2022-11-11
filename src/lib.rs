@@ -2,8 +2,4 @@
 
 mod db;
 
-pub use db::{
-    Db,
-    connect_pg,
-    get_pg_conf,
-};
+pub use db::{connect_pg, get_pg_conf, Db};
