@@ -1,17 +1,17 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc, path::Path};
 
 use anyhow::{anyhow, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool, RecyclingMethod};
 use deadpool_redis::{Config as RConf, Connection, Pool as RedisPool, Runtime};
 use google_secretmanager1::{
-    hyper::Client,
-    hyper_rustls,
+    hyper::{Client, client::HttpConnector},
+    hyper_rustls::{self, HttpsConnector},
     oauth2::{ServiceAccountAuthenticator, ServiceAccountKey},
     SecretManager,
 };
-use openssl::ssl::{SslConnector, SslMethod};
+use openssl::ssl::{SslConnector, SslMethod, SslConnectorBuilder};
 use postgres_openssl::MakeTlsConnector;
-use tokio::{sync::RwLock, try_join};
+use tokio::{sync::RwLock, try_join, fs};
 use tokio_postgres::{Config as PgConf, NoTls};
 
 pub async fn get_pg_conf(
@@ -33,14 +33,15 @@ pub async fn get_redis_conf(
     Ok(RConf::from_url(cxn))
 }
 
-pub fn connect_pg(cfg: tokio_postgres::Config, pool_size: usize, isroach: bool) -> Result<PgPool> {
+pub async fn connect_pg(sa: &ServiceAccountKey, project: &str, cfg: tokio_postgres::Config, pool_size: usize, isroach: bool, cert: &str) -> Result<PgPool> {
     let mgr_config = ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     };
 
     let mgr = if isroach {
         let mut builder = SslConnector::builder(SslMethod::tls())?;
-        builder.set_ca_file("roach.crt")?;
+        cert_it(sa, project,&mut builder, cert).await?;
+
         let connector = MakeTlsConnector::new(builder.build());
         Manager::from_config(cfg, connector, mgr_config)
         // let mut builder = Tls::builder(::tls()).expect("unable to create sslconnector builder");
@@ -52,22 +53,32 @@ pub fn connect_pg(cfg: tokio_postgres::Config, pool_size: usize, isroach: bool) 
     Ok(pool)
 }
 
+async fn cert_it(secret: &ServiceAccountKey, project: &str, b: &mut SslConnectorBuilder, cert: &str) -> Result<()> {
+    if !Path::new(cert).is_file() {
+        let hub = secrets_hub(secret).await?;
+        
+        let secret_name = format!("projects/{project}/secrects/{}/versions/latest", cert.replace(".crt", ""));
+        let (_, s) = hub
+            .projects()
+            .secrets_versions_access(&secret_name)
+            .doit()
+            .await?;
+
+        let secret = if let Some(pl) = s.payload && let Some(d) = pl.data {
+            base64::decode(d.as_bytes())?
+        } else {
+            return Err(anyhow!("Invalid db credentials"));
+        };
+
+        fs::write(cert, &secret[..]).await?;
+    }
+    b.set_ca_file(cert)?;
+    Ok(())
+}
+
 // returns the connection string as a secret
 pub async fn get_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str) -> Result<String> {
-    let auth = ServiceAccountAuthenticator::builder(secret.clone())
-        .build()
-        .await?;
-    let hub = SecretManager::new(
-        Client::builder().build(
-            hyper_rustls::HttpsConnectorBuilder::new()
-                .with_native_roots()
-                .https_or_http()
-                .enable_http1()
-                .enable_http2()
-                .build(),
-        ),
-        auth,
-    );
+    let hub = secrets_hub(secret).await?;
 
     let secret_name = format!("projects/{project}/secrets/db-cxn-{db}/versions/latest");
     let (_, s) = hub
@@ -83,6 +94,25 @@ pub async fn get_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str)
     };
 
     Ok(String::from_utf8(secret)?)
+}
+
+async fn secrets_hub(secret: &ServiceAccountKey) -> Result<SecretManager<HttpsConnector<HttpConnector>>> {
+    let auth = ServiceAccountAuthenticator::builder(secret.clone())
+        .build()
+        .await?;
+    let hub = SecretManager::new(
+        Client::builder().build(
+            hyper_rustls::HttpsConnectorBuilder::new()
+                .with_native_roots()
+                .https_or_http()
+                .enable_http1()
+                .enable_http2()
+                .build(),
+        ),
+        auth,
+    );
+
+    Ok(hub)
 }
 
 pub struct Db {
@@ -114,7 +144,7 @@ impl Db {
     }
 
     async fn connect_xai_pg(project: &str, sa: &ServiceAccountKey) -> Result<PgPool> {
-        connect_pg(get_pg_conf(project, sa, "xai").await?, 4, true)
+        connect_pg(sa, project, get_pg_conf(project, sa, "xai").await?, 4, true, "roach.crt").await
     }
 
     pub async fn get_xai_pg(&self) -> Result<Object> {
@@ -151,10 +181,13 @@ impl Db {
 
     async fn connect_tenant_pg(project: &str, sa: &ServiceAccountKey, org: &str) -> Result<PgPool> {
         let pool = connect_pg(
+            sa,
+            project,
             get_pg_conf(project, sa, org.replace("o-", "db").to_lowercase().as_str()).await?,
             2,
             false,
-        )?;
+            "roach.crt"
+        ).await?;
 
         // making sure a bad connection crashes
         {
