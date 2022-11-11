@@ -57,7 +57,7 @@ async fn cert_it(secret: &ServiceAccountKey, project: &str, b: &mut SslConnector
     if !Path::new(cert).is_file() {
         let hub = secrets_hub(secret).await?;
         
-        let secret_name = format!("projects/{project}/secrects/{}/versions/latest", cert.replace(".crt", ""));
+        let secret_name = format!("projects/{project}/secrets/{}/versions/latest", cert.replace(".crt", ""));
         let (_, s) = hub
             .projects()
             .secrets_versions_access(&secret_name)
