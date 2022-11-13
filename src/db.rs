@@ -1,18 +1,23 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc, path::Path, fs::remove_file};
+use std::{collections::HashMap, fs::remove_file, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool, RecyclingMethod};
 use deadpool_redis::{Config as RConf, Connection, Pool as RedisPool, Runtime};
 use google_secretmanager1::{
-    hyper::{Client, client::HttpConnector},
+    api::{AddSecretVersionRequest, Automatic, Replication, Secret, SecretPayload},
+    hyper::{
+        body, client::HttpConnector, header::AUTHORIZATION, Body, Client, Method, Request,
+        StatusCode,
+    },
     hyper_rustls::{self, HttpsConnector},
     oauth2::{ServiceAccountAuthenticator, ServiceAccountKey},
-    SecretManager, api::{Secret, AddSecretVersionRequest, SecretPayload, Replication, Automatic},
+    SecretManager,
 };
-use openssl::ssl::{SslConnector, SslMethod, SslConnectorBuilder};
+use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod};
 use passwords::PasswordGenerator;
 use postgres_openssl::MakeTlsConnector;
-use tokio::{sync::RwLock, try_join, fs::write};
+use serde::Serialize;
+use tokio::{fs::write, sync::RwLock, try_join};
 use tokio_postgres::{Config as PgConf, NoTls};
 
 pub async fn generate_password(len: usize) -> Result<String> {
@@ -29,7 +34,7 @@ pub async fn generate_password(len: usize) -> Result<String> {
 
     match pwd.generate_one() {
         Ok(s) => Ok(s),
-        Err(e) => Err(anyhow!(e))
+        Err(e) => Err(anyhow!(e)),
     }
 }
 
@@ -52,14 +57,21 @@ pub async fn get_redis_conf(
     Ok(RConf::from_url(cxn))
 }
 
-pub async fn connect_pg(sa: &ServiceAccountKey, project: &str, cfg: tokio_postgres::Config, pool_size: usize, isroach: bool, cert: &str) -> Result<PgPool> {
+pub async fn connect_pg(
+    sa: &ServiceAccountKey,
+    project: &str,
+    cfg: tokio_postgres::Config,
+    pool_size: usize,
+    isroach: bool,
+    cert: &str,
+) -> Result<PgPool> {
     let mgr_config = ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     };
 
     let mgr = if isroach {
         let mut builder = SslConnector::builder(SslMethod::tls())?;
-        cert_it(sa, project,&mut builder, cert).await?;
+        cert_it(sa, project, &mut builder, cert).await?;
 
         let connector = MakeTlsConnector::new(builder.build());
         Manager::from_config(cfg, connector, mgr_config)
@@ -72,11 +84,19 @@ pub async fn connect_pg(sa: &ServiceAccountKey, project: &str, cfg: tokio_postgr
     Ok(pool)
 }
 
-async fn cert_it(secret: &ServiceAccountKey, project: &str, b: &mut SslConnectorBuilder, cert: &str) -> Result<()> {
+async fn cert_it(
+    secret: &ServiceAccountKey,
+    project: &str,
+    b: &mut SslConnectorBuilder,
+    cert: &str,
+) -> Result<()> {
     if !Path::new(cert).is_file() {
         let hub = secrets_hub(secret).await?;
-        
-        let secret_name = format!("projects/{project}/secrets/{}/versions/latest", cert.replace(".crt", ""));
+
+        let secret_name = format!(
+            "projects/{project}/secrets/{}/versions/latest",
+            cert.replace(".crt", "")
+        );
         let (_, s) = hub
             .projects()
             .secrets_versions_access(&secret_name)
@@ -115,18 +135,31 @@ pub async fn get_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str)
     Ok(String::from_utf8(secret)?)
 }
 
-async fn set_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str, cxn: &str) -> Result<()> {
+async fn set_cxn_secret(
+    project: &str,
+    secret: &ServiceAccountKey,
+    db: &str,
+    cxn: &str,
+) -> Result<()> {
     let hub = secrets_hub(secret).await?;
 
     let secret_id = format!("db-cxn-{db}");
     let parent = format!("projects/{project}");
-    
-    hub.projects().secrets_create(Secret {
-        replication: Some( Replication { automatic: Some( Automatic::default()), ..Default::default() } ),
-        ..Default::default()
-    }, &parent)
+
+    hub.projects()
+        .secrets_create(
+            Secret {
+                replication: Some(Replication {
+                    automatic: Some(Automatic::default()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &parent,
+        )
         .secret_id(&secret_id)
-        .doit().await?;
+        .doit()
+        .await?;
 
     let data = base64::encode(cxn.as_bytes());
 
@@ -134,15 +167,20 @@ async fn set_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str, cxn
         payload: Some(SecretPayload {
             data: Some(data),
             ..Default::default()
-        })
+        }),
     };
     let parent = format!("projects/{project}/secrets/{secret_id}");
-    hub.projects().secrets_add_version( vrq, &parent).doit().await?;
+    hub.projects()
+        .secrets_add_version(vrq, &parent)
+        .doit()
+        .await?;
 
     Ok(())
 }
 
-async fn secrets_hub(secret: &ServiceAccountKey) -> Result<SecretManager<HttpsConnector<HttpConnector>>> {
+async fn secrets_hub(
+    secret: &ServiceAccountKey,
+) -> Result<SecretManager<HttpsConnector<HttpConnector>>> {
     let auth = ServiceAccountAuthenticator::builder(secret.clone())
         .build()
         .await?;
@@ -161,16 +199,35 @@ async fn secrets_hub(secret: &ServiceAccountKey) -> Result<SecretManager<HttpsCo
     Ok(hub)
 }
 
+async fn get_google_token(a: &str) -> Result<String> {
+    let gurl = format!("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience={a}");
+
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(gurl)
+        .header("Metadata-Flavor", "Google")
+        .body(Body::empty())?;
+
+    let client = Client::new();
+    let res = client.request(req).await?;
+
+    let body = &body::to_bytes(res.into_body()).await?;
+
+    Ok(std::str::from_utf8(body)?.to_string())
+    // Ok("somerandomtoken".to_string())
+}
+
 pub struct Db {
     sa: ServiceAccountKey,
     xai: PgPool,
     orgpg: Arc<RwLock<HashMap<String, PgPool>>>,
     redis: RedisPool,
     project: String,
+    migrator: String,
 }
 
 impl Db {
-    pub async fn new(project: &str, sa: ServiceAccountKey) -> Result<Self> {
+    pub async fn new(project: &str, sa: ServiceAccountKey, migrator: &str) -> Result<Self> {
         // let gcs = GClient::default();
         // let c = get_db_conf(&gcs, "xai.db").await?;
         let (xai, redis) = try_join!(
@@ -186,11 +243,20 @@ impl Db {
             orgpg: Arc::new(RwLock::new(HashMap::new())),
             redis,
             project: project.to_owned(),
+            migrator: migrator.to_owned(),
         })
     }
 
     async fn connect_xai_pg(project: &str, sa: &ServiceAccountKey) -> Result<PgPool> {
-        connect_pg(sa, project, get_pg_conf(project, sa, "xai").await?, 4, true, "roach.crt").await
+        connect_pg(
+            sa,
+            project,
+            get_pg_conf(project, sa, "xai").await?,
+            4,
+            true,
+            "roach.crt",
+        )
+        .await
     }
 
     pub async fn get_xai_pg(&self) -> Result<Object> {
@@ -232,8 +298,9 @@ impl Db {
             get_pg_conf(project, sa, org.replace("o-", "db").to_lowercase().as_str()).await?,
             2,
             true,
-            "roach.crt"
-        ).await?;
+            "roach.crt",
+        )
+        .await?;
 
         // making sure a bad connection crashes
         {
@@ -272,7 +339,9 @@ impl Db {
     // 5. Call migration script to run migration on this database
     // 6. Ensure tenant
     pub async fn new_tenant_db(&self, org: &str, cluster: &str) -> Result<()> {
-        let (conf, cxn) = self.get_cluster_default(&self.sa, &self.project, cluster).await?;
+        let (conf, cxn) = self
+            .get_cluster_default(&self.sa, &self.project, cluster)
+            .await?;
 
         let (usr, pwd) = self.create_db_user(&cxn, org).await?;
         let db = self.create_database(&cxn, org, &usr).await?;
@@ -287,7 +356,7 @@ impl Db {
                 } else {
                     return Err(anyhow!("host not found"));
                 }
-            },
+            }
         };
 
         let opt = if let Some(opt) = conf.get_options() {
@@ -296,21 +365,28 @@ impl Db {
             "".to_owned()
         };
 
-        let cxnstr: String = format!("postgresql://{usr}:{pwd}@{host}:{port}/{db}?sslmode=verify-full&options={opt}");
+        let cxnstr: String = format!(
+            "postgresql://{usr}:{pwd}@{host}:{port}/{db}?sslmode=verify-full&options={opt}"
+        );
         set_cxn_secret(&self.project, &self.sa, &db, &cxnstr).await?;
 
         // check if connection is working properly or not
         let _ = self.get_tenant_pg(org).await?;
-
-        println!("TODO: RUN migrations for {org} here");
+        self.run_migration(org).await?;
 
         Ok(())
     }
 
-    async fn get_cluster_default(&self, secret: &ServiceAccountKey, project: &str, cluster: &str) -> Result<(PgConf, PgPool)> {
+    async fn get_cluster_default(
+        &self,
+        secret: &ServiceAccountKey,
+        project: &str,
+        cluster: &str,
+    ) -> Result<(PgConf, PgPool)> {
         let hub = secrets_hub(secret).await?;
 
-        let secret_name = format!("projects/{project}/secrets/db-cxn-{cluster}-default/versions/latest");
+        let secret_name =
+            format!("projects/{project}/secrets/db-cxn-{cluster}-default/versions/latest");
         let (_, s) = hub
             .projects()
             .secrets_versions_access(&secret_name)
@@ -323,11 +399,12 @@ impl Db {
             return Err(anyhow!("Invalid db credentials"));
         };
 
-        let conf = PgConf::from_str(
-            cxn.replace("verify-full", "require").as_str(),
-        )?;
+        let conf = PgConf::from_str(cxn.replace("verify-full", "require").as_str())?;
 
-        Ok((conf.clone(), connect_pg(secret, project, conf, 4, true, "roach.crt").await?))
+        Ok((
+            conf.clone(),
+            connect_pg(secret, project, conf, 4, true, "roach.crt").await?,
+        ))
     }
 
     async fn create_db_user(&self, pg: &PgPool, org: &str) -> Result<(String, String)> {
@@ -359,6 +436,57 @@ impl Db {
     }
 }
 
+#[derive(Serialize)]
+struct RunMigration {
+    id: String,
+}
+
+impl Db {
+    async fn run_migration(&self, org: &str) -> Result<()> {
+        let rb = RunMigration { id: org.to_owned() };
+        let body = serde_json::to_vec(&rb)?;
+
+        let token = if !self.migrator.contains("localhost") {
+            get_google_token(&self.migrator).await?
+        } else {
+            String::new()
+        };
+
+        let uri = format!("{}/m", &self.migrator);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .uri(&uri)
+            .body(Body::from(body))?;
+
+        let res = if !self.migrator.contains("localhost") {
+            let client = Client::builder().build(
+                hyper_rustls::HttpsConnectorBuilder::new()
+                    .with_native_roots()
+                    .https_or_http()
+                    .enable_http1()
+                    .enable_http2()
+                    .build(),
+            );
+
+            client.request(req).await?
+        } else {
+            let client = Client::builder().build(HttpConnector::new());
+
+            client.request(req).await?
+        };
+
+        if res.status() != StatusCode::OK {
+            return Err(anyhow!(
+                "non-200 response code {} from migrator",
+                res.status()
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl Drop for Db {
     fn drop(&mut self) {
         for p in glob::glob("*.crt").unwrap().filter_map(Result::ok) {
@@ -382,7 +510,6 @@ mod tests {
     use super::set_cxn_secret;
 
     async fn get_service_account() -> Result<ServiceAccountKey> {
-
         let f = if let Ok(s) = env::var("SERVICE_ACCOUNT_JSON") {
             s
         } else {
@@ -393,11 +520,15 @@ mod tests {
         Ok(serde_json::from_str::<ServiceAccountKey>(&f)?)
     }
 
-
     #[tokio::test]
     async fn new_tenant_db() -> Result<()> {
         let proj = env::var("X_PROJECT")?;
-        let db = Db::new(proj.as_str(), get_service_account().await?).await?;
+        let db = Db::new(
+            proj.as_str(),
+            get_service_account().await?,
+            "http://localhost:8080",
+        )
+        .await?;
 
         let neworg = env::var("X_ORG")?;
         let cluster = env::var("X_CLUSTER")?;
@@ -411,7 +542,9 @@ mod tests {
         let proj = env::var("X_PROJECT")?;
 
         let sa = get_service_account().await?;
-        set_cxn_secret(&proj, &sa, "s0m3database", "S0m3S3cr3tMess@g3").await.unwrap();
+        set_cxn_secret(&proj, &sa, "s0m3database", "S0m3S3cr3tMess@g3")
+            .await
+            .unwrap();
 
         Ok(())
     }
