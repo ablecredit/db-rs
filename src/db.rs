@@ -223,13 +223,11 @@ pub struct Db {
     orgpg: Arc<RwLock<HashMap<String, PgPool>>>,
     redis: RedisPool,
     project: String,
-    migrator: String,
+    migrator: Option<String>,
 }
 
 impl Db {
-    pub async fn new(project: &str, sa: ServiceAccountKey, migrator: &str) -> Result<Self> {
-        // let gcs = GClient::default();
-        // let c = get_db_conf(&gcs, "xai.db").await?;
+    pub async fn new(project: &str, sa: ServiceAccountKey) -> Result<Self> {
         let (xai, redis) = try_join!(
             Self::connect_xai_pg(project, &sa),
             Self::connect_redis(project, &sa)
@@ -243,7 +241,25 @@ impl Db {
             orgpg: Arc::new(RwLock::new(HashMap::new())),
             redis,
             project: project.to_owned(),
-            migrator: migrator.to_owned(),
+            migrator: None,
+        })
+    }
+
+    pub async fn new_with_migrator(project: &str, sa: ServiceAccountKey, migrator: &str) -> Result<Self> {
+        let (xai, redis) = try_join!(
+            Self::connect_xai_pg(project, &sa),
+            Self::connect_redis(project, &sa)
+        )?;
+
+        // create client connection for sentry gRPC here and get session from there
+        // and return Ok((true, Session))
+        Ok(Self {
+            sa,
+            xai,
+            orgpg: Arc::new(RwLock::new(HashMap::new())),
+            redis,
+            project: project.to_owned(),
+            migrator: Some(migrator.to_owned())
         })
     }
 
@@ -446,13 +462,19 @@ impl Db {
         let rb = RunMigration { id: org.to_owned() };
         let body = serde_json::to_vec(&rb)?;
 
-        let token = if !self.migrator.contains("localhost") {
-            get_google_token(&self.migrator).await?
+        let mig = if let Some(m) = &self.migrator {
+            m.to_owned()
+        } else {
+            return Err(anyhow!("Migrator not initialized"))
+        };
+
+        let token = if !mig.contains("localhost") {
+            get_google_token(&mig).await?
         } else {
             String::new()
         };
 
-        let uri = format!("{}/m", &self.migrator);
+        let uri = format!("{}/m", &mig);
 
         let req = Request::builder()
             .method(Method::POST)
@@ -460,7 +482,7 @@ impl Db {
             .uri(&uri)
             .body(Body::from(body))?;
 
-        let res = if !self.migrator.contains("localhost") {
+        let res = if !&mig.contains("localhost") {
             let client = Client::builder().build(
                 hyper_rustls::HttpsConnectorBuilder::new()
                     .with_native_roots()
@@ -523,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn new_tenant_db() -> Result<()> {
         let proj = env::var("X_PROJECT")?;
-        let db = Db::new(
+        let db = Db::new_with_migrator(
             proj.as_str(),
             get_service_account().await?,
             "http://localhost:8080",
