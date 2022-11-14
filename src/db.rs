@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::remove_file, path::Path, str::FromStr, sync::Arc};
+use std::{collections::HashMap, fs::remove_file, path::Path, str::FromStr, sync::Arc, env};
 
 use anyhow::{anyhow, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool, RecyclingMethod};
@@ -52,8 +52,10 @@ pub async fn get_pg_conf(
 pub async fn get_redis_conf(
     project: &str,
     sa: &ServiceAccountKey,
+    isdev: bool
 ) -> Result<deadpool_redis::Config> {
-    let cxn = get_cxn_secret(project, sa, "cache").await?;
+    let secretname = if isdev { "dev-cache" } else { "cache" };
+    let cxn = get_cxn_secret(project, sa, secretname).await?;
     Ok(RConf::from_url(cxn))
 }
 
@@ -229,10 +231,16 @@ pub struct Db {
 impl Db {
     pub async fn new(project: &str, secret_path: &str) -> Result<Self> {
         let sa = read_service_account_key(&secret_path).await?;
+
+        let isdev = if let Ok(x_env) = env::var("X_ENV") && x_env == "prod" {
+            false
+        } else {
+            true
+        };
         
         let (xai, redis) = try_join!(
-            Self::connect_xai_pg(project, &sa),
-            Self::connect_redis(project, &sa)
+            Self::connect_xai_pg(project, &sa, isdev),
+            Self::connect_redis(project, &sa, isdev)
         )?;
 
         // create client connection for sentry gRPC here and get session from there
@@ -249,10 +257,15 @@ impl Db {
 
     pub async fn new_with_migrator(project: &str, secret_path: &str, migrator: &str) -> Result<Self> {
         let sa = read_service_account_key(&secret_path).await?;
+        let isdev = if let Ok(x_env) = env::var("X_ENV") && x_env == "prod" {
+            false
+        } else {
+            true
+        };
 
         let (xai, redis) = try_join!(
-            Self::connect_xai_pg(project, &sa),
-            Self::connect_redis(project, &sa)
+            Self::connect_xai_pg(project, &sa, isdev),
+            Self::connect_redis(project, &sa, isdev)
         )?;
 
         // create client connection for sentry gRPC here and get session from there
@@ -267,11 +280,12 @@ impl Db {
         })
     }
 
-    async fn connect_xai_pg(project: &str, sa: &ServiceAccountKey) -> Result<PgPool> {
+    async fn connect_xai_pg(project: &str, sa: &ServiceAccountKey, isdev: bool) -> Result<PgPool> {
+        let db = if isdev { "dev-xai" } else { "xai" };
         connect_pg(
             sa,
             project,
-            get_pg_conf(project, sa, "xai").await?,
+            get_pg_conf(project, sa, db).await?,
             4,
             true,
             "roach.crt",
@@ -287,9 +301,9 @@ impl Db {
         }
     }
 
-    async fn connect_redis(project: &str, sa: &ServiceAccountKey) -> Result<RedisPool> {
+    async fn connect_redis(project: &str, sa: &ServiceAccountKey, isdev: bool) -> Result<RedisPool> {
         // let cfg = RConf::from_url(format!("redis://:{}@{}:{}", pwd, host, port));
-        let cfg = get_redis_conf(project, sa).await?;
+        let cfg = get_redis_conf(project, sa, isdev).await?;
 
         let pool = cfg.create_pool(Some(Runtime::Tokio1))?;
 
