@@ -10,7 +10,7 @@ use google_secretmanager1::{
         StatusCode,
     },
     hyper_rustls::{self, HttpsConnector},
-    oauth2::{ServiceAccountAuthenticator, ServiceAccountKey},
+    oauth2::{ServiceAccountAuthenticator},
     SecretManager,
 };
 use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod};
@@ -19,6 +19,7 @@ use postgres_openssl::MakeTlsConnector;
 use serde::Serialize;
 use tokio::{fs::write, sync::RwLock, try_join};
 use tokio_postgres::{Config as PgConf, NoTls};
+use yup_oauth2::ServiceAccountKey;
 
 pub async fn generate_password(len: usize) -> Result<String> {
     let pwd = PasswordGenerator {
@@ -524,7 +525,7 @@ mod tests {
     use std::env;
 
     use anyhow::Result;
-    use google_secretmanager1::oauth2::ServiceAccountKey;
+    use yup_oauth2::ServiceAccountKey;
     use tokio::fs::read_to_string;
 
     use crate::Db;
