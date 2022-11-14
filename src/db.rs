@@ -10,7 +10,7 @@ use google_secretmanager1::{
         StatusCode,
     },
     hyper_rustls::{self, HttpsConnector},
-    oauth2::{ServiceAccountAuthenticator},
+    oauth2::{ServiceAccountAuthenticator, ServiceAccountKey, read_service_account_key},
     SecretManager,
 };
 use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod};
@@ -19,7 +19,6 @@ use postgres_openssl::MakeTlsConnector;
 use serde::Serialize;
 use tokio::{fs::write, sync::RwLock, try_join};
 use tokio_postgres::{Config as PgConf, NoTls};
-use yup_oauth2::ServiceAccountKey;
 
 pub async fn generate_password(len: usize) -> Result<String> {
     let pwd = PasswordGenerator {
@@ -228,7 +227,9 @@ pub struct Db {
 }
 
 impl Db {
-    pub async fn new(project: &str, sa: ServiceAccountKey) -> Result<Self> {
+    pub async fn new(project: &str, secret_path: &str) -> Result<Self> {
+        let sa = read_service_account_key(&secret_path).await?;
+        
         let (xai, redis) = try_join!(
             Self::connect_xai_pg(project, &sa),
             Self::connect_redis(project, &sa)
@@ -246,7 +247,9 @@ impl Db {
         })
     }
 
-    pub async fn new_with_migrator(project: &str, sa: ServiceAccountKey, migrator: &str) -> Result<Self> {
+    pub async fn new_with_migrator(project: &str, secret_path: &str, migrator: &str) -> Result<Self> {
+        let sa = read_service_account_key(&secret_path).await?;
+
         let (xai, redis) = try_join!(
             Self::connect_xai_pg(project, &sa),
             Self::connect_redis(project, &sa)
@@ -525,30 +528,20 @@ mod tests {
     use std::env;
 
     use anyhow::Result;
-    use yup_oauth2::ServiceAccountKey;
-    use tokio::fs::read_to_string;
+    use google_secretmanager1::oauth2::read_service_account_key;
 
     use crate::Db;
 
     use super::set_cxn_secret;
 
-    async fn get_service_account() -> Result<ServiceAccountKey> {
-        let f = if let Ok(s) = env::var("SERVICE_ACCOUNT_JSON") {
-            s
-        } else {
-            let safile = env::var("SERVICE_ACCOUNT")?;
-            read_to_string(&safile).await?
-        };
-
-        Ok(serde_json::from_str::<ServiceAccountKey>(&f)?)
-    }
-
     #[tokio::test]
     async fn new_tenant_db() -> Result<()> {
         let proj = env::var("X_PROJECT")?;
+        let sa_path = env::var("SERVICE_ACCOUNT")?;
+        
         let db = Db::new_with_migrator(
             proj.as_str(),
-            get_service_account().await?,
+            &sa_path,
             "http://localhost:8080",
         )
         .await?;
@@ -563,8 +556,9 @@ mod tests {
     #[tokio::test]
     async fn create_secret() -> Result<()> {
         let proj = env::var("X_PROJECT")?;
-
-        let sa = get_service_account().await?;
+        let sa_path = env::var("SERVICE_ACCOUNT")?;
+        let sa = read_service_account_key(&sa_path).await?;
+        
         set_cxn_secret(&proj, &sa, "s0m3database", "S0m3S3cr3tMess@g3")
             .await
             .unwrap();
