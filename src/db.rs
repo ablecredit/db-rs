@@ -288,7 +288,7 @@ impl Db {
             get_pg_conf(project, sa, db).await?,
             4,
             true,
-            "roach.crt",
+            &get_zone_cert(),
         )
         .await
     }
@@ -332,7 +332,7 @@ impl Db {
             get_pg_conf(project, sa, org.replace("o-", "db").to_lowercase().as_str()).await?,
             2,
             true,
-            "roach.crt",
+            &get_zone_cert(),
         )
         .await?;
 
@@ -537,6 +537,14 @@ impl Drop for Db {
     }
 }
 
+fn get_zone_cert() -> String {
+    if let Ok(e) = env::var("X_ENV") && e == "prod" {
+        "roach.crt".to_string()
+    } else {
+        "dev-roach.crt".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::env;
@@ -576,6 +584,22 @@ mod tests {
         set_cxn_secret(&proj, &sa, "s0m3database", "S0m3S3cr3tMess@g3")
             .await
             .unwrap();
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connect_xai() -> Result<()> {
+        let proj = env::var("X_PROJECT")?;
+        let sa_path = env::var("SERVICE_ACCOUNT")?;
+        
+        let db = Db::new(
+            proj.as_str(),
+            &sa_path,
+        )
+        .await?;
+
+        let _ = db.get_xai_pg().await?;
 
         Ok(())
     }
