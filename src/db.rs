@@ -514,6 +514,25 @@ impl Db {
 
         Ok(())
     }
+
+    // deletes from cache
+    pub async fn del_cache(&self, key: &str) -> Result<Vec<u8>> {
+        let mut conn = match self.get_redis().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(anyhow!(e));
+            }
+        };
+
+        match cmd("DEL")
+            .arg(key)
+            .query_async::<Connection, Vec<u8>>(&mut conn)
+            .await
+        {
+            Ok(d) => Ok(d),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
 }
 
 #[derive(Serialize)]
