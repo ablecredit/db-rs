@@ -1,8 +1,8 @@
-use std::{collections::HashMap, fs::remove_file, path::Path, str::FromStr, sync::Arc, env};
+use std::{collections::HashMap, env, fs::remove_file, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool, RecyclingMethod};
-use deadpool_redis::{Config as RConf, Connection, Pool as RedisPool, Runtime};
+use deadpool_redis::{redis::cmd, Config as RConf, Connection, Pool as RedisPool, Runtime};
 use google_secretmanager1::{
     api::{AddSecretVersionRequest, Automatic, Replication, Secret, SecretPayload},
     hyper::{
@@ -10,7 +10,7 @@ use google_secretmanager1::{
         StatusCode,
     },
     hyper_rustls::{self, HttpsConnector},
-    oauth2::{ServiceAccountAuthenticator, ServiceAccountKey, read_service_account_key},
+    oauth2::{read_service_account_key, ServiceAccountAuthenticator, ServiceAccountKey},
     SecretManager,
 };
 use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod};
@@ -52,7 +52,7 @@ pub async fn get_pg_conf(
 pub async fn get_redis_conf(
     project: &str,
     sa: &ServiceAccountKey,
-    isdev: bool
+    isdev: bool,
 ) -> Result<deadpool_redis::Config> {
     let secretname = if isdev { "dev-cache" } else { "cache" };
     let cxn = get_cxn_secret(project, sa, secretname).await?;
@@ -237,7 +237,7 @@ impl Db {
         } else {
             true
         };
-        
+
         let (xai, redis) = try_join!(
             Self::connect_xai_pg(project, &sa, isdev),
             Self::connect_redis(project, &sa, isdev)
@@ -255,7 +255,11 @@ impl Db {
         })
     }
 
-    pub async fn new_with_migrator(project: &str, secret_path: &str, migrator: &str) -> Result<Self> {
+    pub async fn new_with_migrator(
+        project: &str,
+        secret_path: &str,
+        migrator: &str,
+    ) -> Result<Self> {
         let sa = read_service_account_key(&secret_path).await?;
         let isdev = if let Ok(x_env) = env::var("X_ENV") && x_env == "prod" {
             false
@@ -276,7 +280,7 @@ impl Db {
             orgpg: Arc::new(RwLock::new(HashMap::new())),
             redis,
             project: project.to_owned(),
-            migrator: Some(migrator.to_owned())
+            migrator: Some(migrator.to_owned()),
         })
     }
 
@@ -301,7 +305,11 @@ impl Db {
         }
     }
 
-    async fn connect_redis(project: &str, sa: &ServiceAccountKey, isdev: bool) -> Result<RedisPool> {
+    async fn connect_redis(
+        project: &str,
+        sa: &ServiceAccountKey,
+        isdev: bool,
+    ) -> Result<RedisPool> {
         // let cfg = RConf::from_url(format!("redis://:{}@{}:{}", pwd, host, port));
         let cfg = get_redis_conf(project, sa, isdev).await?;
 
@@ -468,6 +476,44 @@ impl Db {
 
         Ok(db)
     }
+
+    pub async fn get_cache(&self, key: &str) -> Result<Vec<u8>> {
+        let mut conn = match self.get_redis().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(anyhow!(e));
+            }
+        };
+
+        match cmd("GET")
+            .arg(key)
+            .query_async::<Connection, Vec<u8>>(&mut conn)
+            .await
+        {
+            Ok(d) => Ok(d),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    // sets a key to cache with ttl
+    pub async fn set_cache(&self, key: &str, val: &[u8], ttl: Option<u16>) -> Result<()> {
+        let mut conn = match self.get_redis().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(anyhow!(e));
+            }
+        };
+        let mut command = cmd("SET");
+
+        command.arg(key).arg(val);
+        if let Some(t) = ttl {
+            command.arg("EX").arg(t);
+        }
+
+        command.query_async::<_, ()>(&mut conn).await?;
+
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -483,7 +529,7 @@ impl Db {
         let mig = if let Some(m) = &self.migrator {
             m.to_owned()
         } else {
-            return Err(anyhow!("Migrator not initialized"))
+            return Err(anyhow!("Migrator not initialized"));
         };
 
         let token = if !mig.contains("localhost") {
@@ -560,13 +606,8 @@ mod tests {
     async fn new_tenant_db() -> Result<()> {
         let proj = env::var("X_PROJECT")?;
         let sa_path = env::var("SERVICE_ACCOUNT")?;
-        
-        let db = Db::new_with_migrator(
-            proj.as_str(),
-            &sa_path,
-            "http://localhost:8080",
-        )
-        .await?;
+
+        let db = Db::new_with_migrator(proj.as_str(), &sa_path, "http://localhost:8080").await?;
 
         let neworg = env::var("X_ORG")?;
         let cluster = env::var("X_CLUSTER")?;
@@ -580,7 +621,7 @@ mod tests {
         let proj = env::var("X_PROJECT")?;
         let sa_path = env::var("SERVICE_ACCOUNT")?;
         let sa = read_service_account_key(&sa_path).await?;
-        
+
         set_cxn_secret(&proj, &sa, "s0m3database", "S0m3S3cr3tMess@g3")
             .await
             .unwrap();
@@ -592,12 +633,8 @@ mod tests {
     async fn connect_xai() -> Result<()> {
         let proj = env::var("X_PROJECT")?;
         let sa_path = env::var("SERVICE_ACCOUNT")?;
-        
-        let db = Db::new(
-            proj.as_str(),
-            &sa_path,
-        )
-        .await?;
+
+        let db = Db::new(proj.as_str(), &sa_path).await?;
 
         let _ = db.get_xai_pg().await?;
 
