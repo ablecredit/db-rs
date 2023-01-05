@@ -516,7 +516,7 @@ impl Db {
     }
 
     // deletes from cache
-    pub async fn del_cache(&self, key: &str) -> Result<Vec<u8>> {
+    pub async fn del_cache(&self, key: &str) -> Result<usize> {
         let mut conn = match self.get_redis().await {
             Ok(c) => c,
             Err(e) => {
@@ -526,7 +526,7 @@ impl Db {
 
         match cmd("DEL")
             .arg(key)
-            .query_async::<Connection, Vec<u8>>(&mut conn)
+            .query_async::<Connection, usize>(&mut conn)
             .await
         {
             Ok(d) => Ok(d),
@@ -656,6 +656,19 @@ mod tests {
         let db = Db::new(proj.as_str(), &sa_path).await?;
 
         let _ = db.get_xai_pg().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn del_cache() -> Result<()> {
+        let proj = env::var("X_PROJECT")?;
+        let sa_path = env::var("SERVICE_ACCOUNT")?;
+
+        let db = Db::new(proj.as_str(), &sa_path).await?;
+
+        let t = db.del_cache("hello").await?;
+        println!("DelCache: {t}");
 
         Ok(())
     }
