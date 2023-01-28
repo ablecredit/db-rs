@@ -55,7 +55,8 @@ pub async fn get_redis_conf(
     isdev: bool,
 ) -> Result<deadpool_redis::Config> {
     let secretname = if isdev { "dev-cache" } else { "cache" };
-    let cxn = get_cxn_secret(project, sa, secretname).await?;
+    let cxn = get_cxn_secret(project, sa, secretname).await?.replacen("redis://", "rediss://", 1);
+    
     Ok(RConf::from_url(cxn))
 }
 
@@ -310,7 +311,6 @@ impl Db {
         sa: &ServiceAccountKey,
         isdev: bool,
     ) -> Result<RedisPool> {
-        // let cfg = RConf::from_url(format!("redis://:{}@{}:{}", pwd, host, port));
         let cfg = get_redis_conf(project, sa, isdev).await?;
 
         let pool = cfg.create_pool(Some(Runtime::Tokio1))?;
@@ -669,6 +669,19 @@ mod tests {
 
         let t = db.del_cache("hello").await?;
         println!("DelCache: {t}");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_cache() -> Result<()> {
+        let proj = env::var("X_PROJECT")?;
+        let sa_path = env::var("SERVICE_ACCOUNT")?;
+
+        let db = Db::new(proj.as_str(), &sa_path).await?;
+
+        let t = db.get_cache("hello").await?;
+        println!("GetCache: {}", String::from_utf8(t).unwrap());
 
         Ok(())
     }
