@@ -55,7 +55,7 @@ pub async fn get_redis_conf(
     isdev: bool,
 ) -> Result<deadpool_redis::Config> {
     let secretname = if isdev { "dev-cache" } else { "cache" };
-    let cxn = get_cxn_secret(project, sa, secretname).await?.replacen("redis://", "rediss://", 1);
+    let cxn = get_cxn_secret(project, sa, secretname).await?;
     
     Ok(RConf::from_url(cxn))
 }
