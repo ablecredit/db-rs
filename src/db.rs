@@ -108,7 +108,7 @@ async fn cert_it(
             .await?;
 
         let secret = if let Some(pl) = s.payload && let Some(d) = pl.data {
-            general_purpose::STANDARD.decode(d)?
+            d
         } else {
             return Err(anyhow!("Invalid db credentials"));
         };
@@ -131,7 +131,7 @@ pub async fn get_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str)
         .await?;
 
     let secret = if let Some(pl) = s.payload && let Some(d) = pl.data {
-        general_purpose::STANDARD.decode(d)?
+        d
     } else {
         return Err(anyhow!("Invalid db credentials"));
     };
@@ -435,7 +435,7 @@ impl Db {
             .await?;
 
         let cxn = if let Some(pl) = s.payload && let Some(d) = pl.data {
-            String::from_utf8(general_purpose::STANDARD.decode(d)?)?
+            String::from_utf8(d)?
         } else {
             return Err(anyhow!("Invalid db credentials"));
         };
