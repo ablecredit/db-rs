@@ -1,6 +1,7 @@
 use std::{collections::HashMap, env, fs::remove_file, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose, Engine};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool, RecyclingMethod};
 use deadpool_redis::{redis::cmd, Config as RConf, Connection, Pool as RedisPool, Runtime};
 use google_secretmanager1::{
@@ -56,7 +57,7 @@ pub async fn get_redis_conf(
 ) -> Result<deadpool_redis::Config> {
     let secretname = if isdev { "dev-cache" } else { "cache" };
     let cxn = get_cxn_secret(project, sa, secretname).await?;
-    
+
     Ok(RConf::from_url(cxn))
 }
 
@@ -107,7 +108,7 @@ async fn cert_it(
             .await?;
 
         let secret = if let Some(pl) = s.payload && let Some(d) = pl.data {
-            base64::decode(d.as_bytes())?
+            general_purpose::STANDARD.decode(d)?
         } else {
             return Err(anyhow!("Invalid db credentials"));
         };
@@ -130,7 +131,7 @@ pub async fn get_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str)
         .await?;
 
     let secret = if let Some(pl) = s.payload && let Some(d) = pl.data {
-        base64::decode(d.as_bytes())?
+        general_purpose::STANDARD.decode(d)?
     } else {
         return Err(anyhow!("Invalid db credentials"));
     };
@@ -164,11 +165,9 @@ async fn set_cxn_secret(
         .doit()
         .await?;
 
-    let data = base64::encode(cxn.as_bytes());
-
     let vrq = AddSecretVersionRequest {
         payload: Some(SecretPayload {
-            data: Some(data),
+            data: Some(general_purpose::URL_SAFE.encode(cxn).as_bytes().to_vec()),
             ..Default::default()
         }),
     };
@@ -436,7 +435,7 @@ impl Db {
             .await?;
 
         let cxn = if let Some(pl) = s.payload && let Some(d) = pl.data {
-            String::from_utf8(base64::decode(d.as_bytes())?)?
+            String::from_utf8(general_purpose::STANDARD.decode(d)?)?
         } else {
             return Err(anyhow!("Invalid db credentials"));
         };
