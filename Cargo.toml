@@ -15,8 +15,9 @@ google-secretmanager1 = "*"
 openssl               = "0"
 passwords             = "3"
 postgres-openssl      = "0"
-redis                 = { version = "0", default-features = false, features = ["tokio-native-tls-comp", "tls-rustls"] }
+redis                 = { version = "0", default-features = false, features = ["tokio-native-tls-comp","tokio-rustls"] }
 serde                 = { version = "1", features = ["derive"] }
 serde_json            = "1"
 tokio                 = { version = "1", default-features = false, features = ["rt-multi-thread"] }
 tokio-postgres        = { version = "0", features = ["with-chrono-0_4","with-serde_json-1"] }
+tokio-rustls          = { version = "0" }
