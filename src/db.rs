@@ -1,7 +1,6 @@
 use std::{collections::HashMap, env, fs::remove_file, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose, Engine};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool, RecyclingMethod};
 use deadpool_redis::{redis::cmd, Config as RConf, Connection, Pool as RedisPool, Runtime};
 use google_secretmanager1::{
@@ -167,7 +166,7 @@ async fn set_cxn_secret(
 
     let vrq = AddSecretVersionRequest {
         payload: Some(SecretPayload {
-            data: Some(general_purpose::URL_SAFE.encode(cxn).as_bytes().to_vec()),
+            data: Some(cxn.as_bytes().to_vec()),
             ..Default::default()
         }),
     };
