@@ -69,7 +69,7 @@ pub async fn connect_pg(
     cert: &str,
 ) -> Result<PgPool> {
     let mgr_config = ManagerConfig {
-        recycling_method: RecyclingMethod::Fast,
+        recycling_method: RecyclingMethod::Verified,
     };
 
     let mgr = if isroach {
