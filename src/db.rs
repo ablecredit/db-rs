@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env, fs::remove_file, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Result};
-use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool, RecyclingMethod};
+use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool};
 use deadpool_redis::{redis::cmd, Config as RConf, Connection, Pool as RedisPool, Runtime};
 use google_secretmanager1::{
     api::{AddSecretVersionRequest, Automatic, Replication, Secret, SecretPayload},
@@ -78,7 +78,7 @@ pub async fn connect_pg(
         Manager::from_config(cfg, connector, mgr_cfg)
         // let mut builder = Tls::builder(::tls()).expect("unable to create sslconnector builder");
     } else {
-        Manager::from_config(cfg, NoTls, mgr_config)
+        Manager::from_config(cfg, NoTls, mgr_cfg)
     };
     let pool = PgPool::builder(mgr).max_size(pool_size).build()?;
 
