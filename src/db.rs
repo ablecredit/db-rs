@@ -68,16 +68,12 @@ pub async fn connect_pg(
     isroach: bool,
     cert: &str,
 ) -> Result<PgPool> {
-    let mgr_config = ManagerConfig {
-        recycling_method: RecyclingMethod::Verified,
-    };
-
     let mgr = if isroach {
         let mut builder = SslConnector::builder(SslMethod::tls())?;
         cert_it(sa, project, &mut builder, cert).await?;
 
         let connector = MakeTlsConnector::new(builder.build());
-        Manager::from_config(cfg, connector, mgr_config)
+        Manager::from_config(cfg, connector, ManagerConfig::default())
         // let mut builder = Tls::builder(::tls()).expect("unable to create sslconnector builder");
     } else {
         Manager::from_config(cfg, NoTls, mgr_config)
