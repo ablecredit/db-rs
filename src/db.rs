@@ -104,7 +104,9 @@ async fn cert_it(
             .doit()
             .await?;
 
-        let secret = if let Some(pl) = s.payload && let Some(d) = pl.data {
+        let secret = if let Some(pl) = s.payload
+            && let Some(d) = pl.data
+        {
             d
         } else {
             return Err(anyhow!("Invalid db credentials"));
@@ -127,7 +129,9 @@ pub async fn get_cxn_secret(project: &str, secret: &ServiceAccountKey, db: &str)
         .doit()
         .await?;
 
-    let secret = if let Some(pl) = s.payload && let Some(d) = pl.data {
+    let secret = if let Some(pl) = s.payload
+        && let Some(d) = pl.data
+    {
         d
     } else {
         return Err(anyhow!("Invalid db credentials"));
@@ -229,7 +233,9 @@ impl Db {
     pub async fn new(project: &str, secret_path: &str) -> Result<Self> {
         let sa = read_service_account_key(&secret_path).await?;
 
-        let isdev = if let Ok(x_env) = env::var("X_ENV") && x_env == "prod" {
+        let isdev = if let Ok(x_env) = env::var("X_ENV")
+            && x_env == "prod"
+        {
             false
         } else {
             true
@@ -258,7 +264,9 @@ impl Db {
         migrator: &str,
     ) -> Result<Self> {
         let sa = read_service_account_key(&secret_path).await?;
-        let isdev = if let Ok(x_env) = env::var("X_ENV") && x_env == "prod" {
+        let isdev = if let Ok(x_env) = env::var("X_ENV")
+            && x_env == "prod"
+        {
             false
         } else {
             true
@@ -302,7 +310,7 @@ impl Db {
         }
     }
 
-    async fn connect_redis(
+    pub async fn connect_redis(
         project: &str,
         sa: &ServiceAccountKey,
         isdev: bool,
@@ -353,11 +361,12 @@ impl Db {
 
         let db = {
             let o = self.orgpg.read().await;
-            if let Some(d) = o.get(org) &&
-            let Ok(p) = d.get().await {
+            if let Some(d) = o.get(org)
+                && let Ok(p) = d.get().await
+            {
                 p
             } else {
-                return Err(anyhow!("while getting tenant db[{}]",org));
+                return Err(anyhow!("while getting tenant db[{}]", org));
             }
         };
         Ok(db)
@@ -431,7 +440,9 @@ impl Db {
             .doit()
             .await?;
 
-        let cxn = if let Some(pl) = s.payload && let Some(d) = pl.data {
+        let cxn = if let Some(pl) = s.payload
+            && let Some(d) = pl.data
+        {
             String::from_utf8(d)?
         } else {
             return Err(anyhow!("Invalid db credentials"));
@@ -599,7 +610,9 @@ impl Drop for Db {
 }
 
 fn get_zone_cert() -> String {
-    if let Ok(e) = env::var("X_ENV") && e == "prod" {
+    if let Ok(e) = env::var("X_ENV")
+        && e == "prod"
+    {
         "roach.crt".to_string()
     } else {
         "dev-roach.crt".to_string()
