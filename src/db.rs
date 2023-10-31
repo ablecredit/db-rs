@@ -372,8 +372,8 @@ impl Db {
         Ok(db)
     }
 
-    pub async fn get_redis(&self) -> Result<Connection> {
-        Ok(self.redis.get().await?)
+    pub async fn get_redis(redis: &RedisPool) -> Result<Connection> {
+        Ok(redis.get().await?)
     }
 
     // This is a complicated step, which createa and migrates a new tenant
@@ -484,17 +484,10 @@ impl Db {
         Ok(db)
     }
 
-    pub async fn get_cache(&self, key: &str) -> Result<Vec<u8>> {
-        let mut conn = match self.get_redis().await {
-            Ok(c) => c,
-            Err(e) => {
-                return Err(anyhow!(e));
-            }
-        };
-
+    async fn cmd_get(conn: &mut Connection, key: &str) -> Result<Vec<u8>> {
         match cmd("GET")
             .arg(key)
-            .query_async::<Connection, Vec<u8>>(&mut conn)
+            .query_async(conn)
             .await
         {
             Ok(d) => Ok(d),
@@ -502,14 +495,29 @@ impl Db {
         }
     }
 
-    // sets a key to cache with ttl
-    pub async fn set_cache(&self, key: &str, val: &[u8], ttl: Option<u16>) -> Result<()> {
-        let mut conn = match self.get_redis().await {
+    pub async fn get_cache(&self, key: &str) -> Result<Vec<u8>> {
+        let mut conn = match Self::get_redis(&self.redis).await {
             Ok(c) => c,
             Err(e) => {
                 return Err(anyhow!(e));
             }
         };
+
+        Self::cmd_get(&mut conn, key).await
+    }
+
+    pub async fn get_cache_for_pool(cache: Arc<RedisPool>, key: &str) -> Result<Vec<u8>> {
+        let mut conn = match Self::get_redis(&cache).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(anyhow!(e))
+            }
+        };
+
+        Self::cmd_get(&mut conn, key).await
+    }
+
+    async fn cmd_set(conn: &mut Connection, key: &str, val: &[u8], ttl: Option<u16>) -> Result<()> {
         let mut command = cmd("SET");
 
         command.arg(key).arg(val);
@@ -517,14 +525,37 @@ impl Db {
             command.arg("EX").arg(t);
         }
 
-        command.query_async::<_, ()>(&mut conn).await?;
+        command.query_async(conn).await?;
 
         Ok(())
     }
 
+    // sets a key to cache with ttl
+    pub async fn set_cache(&self, key: &str, val: &[u8], ttl: Option<u16>) -> Result<()> {
+        let mut conn = match Self::get_redis(&self.redis).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(anyhow!(e));
+            }
+        };
+
+        Self::cmd_set(&mut conn, key, val, ttl).await
+    }
+
+    pub async fn set_cache_for_pool(cache: Arc<RedisPool>, key: &str, val: &[u8], ttl: Option<u16>) -> Result<()> {
+        let mut conn = match Self::get_redis(&cache).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(anyhow!(e))
+            }
+        };
+
+        Self::cmd_set(&mut conn, key, val, ttl).await
+    }
+
     // deletes from cache
     pub async fn del_cache(&self, key: &str) -> Result<usize> {
-        let mut conn = match self.get_redis().await {
+        let mut conn = match Self::get_redis(&self.redis).await {
             Ok(c) => c,
             Err(e) => {
                 return Err(anyhow!(e));
@@ -533,7 +564,7 @@ impl Db {
 
         match cmd("DEL")
             .arg(key)
-            .query_async::<Connection, usize>(&mut conn)
+            .query_async(&mut conn)
             .await
         {
             Ok(d) => Ok(d),
