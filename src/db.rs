@@ -484,12 +484,12 @@ impl Db {
         Ok(db)
     }
 
+    pub async fn get_cache_pool_arced(&self) -> Arc<RedisPool> {
+        Arc::new(self.redis.clone())
+    }
+
     async fn cmd_get(conn: &mut Connection, key: &str) -> Result<Vec<u8>> {
-        match cmd("GET")
-            .arg(key)
-            .query_async(conn)
-            .await
-        {
+        match cmd("GET").arg(key).query_async(conn).await {
             Ok(d) => Ok(d),
             Err(e) => Err(anyhow!(e)),
         }
@@ -509,9 +509,7 @@ impl Db {
     pub async fn get_cache_for_pool(cache: Arc<RedisPool>, key: &str) -> Result<Vec<u8>> {
         let mut conn = match Self::get_redis(&cache).await {
             Ok(c) => c,
-            Err(e) => {
-                return Err(anyhow!(e))
-            }
+            Err(e) => return Err(anyhow!(e)),
         };
 
         Self::cmd_get(&mut conn, key).await
@@ -542,12 +540,15 @@ impl Db {
         Self::cmd_set(&mut conn, key, val, ttl).await
     }
 
-    pub async fn set_cache_for_pool(cache: Arc<RedisPool>, key: &str, val: &[u8], ttl: Option<u16>) -> Result<()> {
+    pub async fn set_cache_for_pool(
+        cache: Arc<RedisPool>,
+        key: &str,
+        val: &[u8],
+        ttl: Option<u16>,
+    ) -> Result<()> {
         let mut conn = match Self::get_redis(&cache).await {
             Ok(c) => c,
-            Err(e) => {
-                return Err(anyhow!(e))
-            }
+            Err(e) => return Err(anyhow!(e)),
         };
 
         Self::cmd_set(&mut conn, key, val, ttl).await
@@ -562,11 +563,7 @@ impl Db {
             }
         };
 
-        match cmd("DEL")
-            .arg(key)
-            .query_async(&mut conn)
-            .await
-        {
+        match cmd("DEL").arg(key).query_async(&mut conn).await {
             Ok(d) => Ok(d),
             Err(e) => Err(anyhow!(e)),
         }
