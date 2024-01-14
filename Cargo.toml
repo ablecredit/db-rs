@@ -11,7 +11,7 @@ deadpool-postgres     = "0"
 deadpool-redis        = { version = "0.14" }
 glob                  = "0"
 google-auth-helper    = { git = "https://github.com/xAmbit-ai/google-auth-helper.git", branch = "main" }
-nimbus                = { git = "https://github.com/xAmbit-ai/nimbus.git", branch = "with-secret-create" }
+nimbus                = { git = "https://github.com/xAmbit-ai/nimbus.git", branch = "main" }
 openssl               = "0"
 passwords             = "3"
 postgres-openssl      = "0"
