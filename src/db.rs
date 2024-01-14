@@ -74,14 +74,7 @@ async fn cert_it(project: &str, b: &mut SslConnectorBuilder, cert: &str) -> Resu
         let secret_manager = SecretManager::new_with_authenticator(auth).await;
 
         let secret = secret_manager
-            .get_secret(
-                project,
-                format!(
-                    "projects/{project}/secrets/db-cxn-{}/versions/latest",
-                    cert.replace(".crt", "")
-                )
-                .as_str(),
-            )
+            .get_secret(project, cert.replace(".crt", "").as_str())
             .await?;
 
         write(cert, &secret[..]).await?;
@@ -96,10 +89,7 @@ pub async fn get_cxn_secret(project: &str, db: &str) -> Result<String> {
     let secret_manager = SecretManager::new_with_authenticator(auth).await;
 
     let secret = secret_manager
-        .get_secret(
-            project,
-            format!("projects/{project}/secrets/db-cxn-{db}/versions/latest").as_str(),
-        )
+        .get_secret(project, format!("db-cxn-{db}").as_str())
         .await?;
 
     Ok(String::from_utf8(secret)?)
