@@ -1,6 +1,6 @@
 [package]
 name = "db"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -8,13 +8,14 @@ edition = "2021"
 [dependencies]
 anyhow                = "1"
 deadpool-postgres     = "0"
-deadpool-redis        = { version = "0.13" }
+deadpool-redis        = { version = "0.14" }
 glob                  = "0"
-google-secretmanager1 = "*"
+google-auth-helper    = { git = "https://github.com/xAmbit-ai/google-auth-helper.git", branch = "main" }
+nimbus                = { git = "https://github.com/xAmbit-ai/nimbus.git", branch = "with-secret-create" }
 openssl               = "0"
 passwords             = "3"
 postgres-openssl      = "0"
-redis                 = { version = "0.23", default-features = false, features = ["tokio-native-tls-comp"] }
+redis                 = { version = "0.24", default-features = false, features = ["tokio-native-tls-comp"] }
 serde                 = { version = "1", features = ["derive"] }
 serde_json            = "1"
 tokio                 = { version = "1", default-features = false, features = ["rt-multi-thread"] }
