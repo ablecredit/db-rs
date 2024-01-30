@@ -31,7 +31,14 @@ pub async fn generate_password(len: usize) -> Result<String> {
 }
 
 pub async fn get_pg_conf(project: &str, db: &str) -> Result<tokio_postgres::Config> {
-    let cxn = get_cxn_secret(project, db).await?;
+    let cxn = match get_cxn_secret(project, db).await {
+        Ok(cxn) => cxn,
+        Err(e) => {
+            error!("get_pg_conf: error trying to get connection secret: {e:?}");
+            return Err(anyhow!(e));
+        }
+    };
+
     Ok(PgConf::from_str(
         cxn.replace("verify-full", "require").as_str(),
     )?)
@@ -39,7 +46,13 @@ pub async fn get_pg_conf(project: &str, db: &str) -> Result<tokio_postgres::Conf
 
 pub async fn get_redis_conf(project: &str, isdev: bool) -> Result<deadpool_redis::Config> {
     let secretname = if isdev { "dev-cache" } else { "cache" };
-    let cxn = get_cxn_secret(project, secretname).await?;
+    let cxn = match get_cxn_secret(project, secretname).await {
+        Ok(cxn) => cxn,
+        Err(e) => {
+            error!("Db.get_redis_conf: error trying to get redis connection secret: {e:?}");
+            return Err(anyhow!(e));
+        }
+    };
 
     Ok(RConf::from_url(cxn))
 }
@@ -88,9 +101,16 @@ pub async fn get_cxn_secret(project: &str, db: &str) -> Result<String> {
     let auth = Authenticator::auth().await?;
     let secret_manager = SecretManager::new_with_authenticator(auth).await;
 
-    let secret = secret_manager
+    let secret = match secret_manager
         .get_secret(project, format!("db-cxn-{db}").as_str())
-        .await?;
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Db.get_cxn_secret: error trying to compose connection secret: {e:?}");
+            return Err(anyhow!(e));
+        }
+    };
 
     Ok(String::from_utf8(secret)?)
 }
@@ -143,10 +163,18 @@ impl Db {
             true
         };
 
-        let (xai, redis) = try_join!(
+        info!("Db.new: initializing DB for dev[{isdev}]");
+
+        let (xai, redis) = match try_join!(
             Self::connect_xai_pg(project, isdev),
             Self::connect_redis(project, isdev)
-        )?;
+        ) {
+            Ok(d) => d,
+            Err(e) => {
+                error!("Db.new: error intializing: {e:?}");
+                return Err(anyhow!(e));
+            }
+        };
 
         // create client connection for sentry gRPC here and get session from there
         // and return Ok((true, Session))
@@ -187,14 +215,14 @@ impl Db {
 
     async fn connect_xai_pg(project: &str, isdev: bool) -> Result<PgPool> {
         let db = if isdev { "dev-xai" } else { "xai" };
-        connect_pg(
-            project,
-            get_pg_conf(project, db).await?,
-            4,
-            true,
-            &get_zone_cert(),
-        )
-        .await
+        let cfg = match get_pg_conf(project, db).await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("Db.connect_xai_pg: error getting pg conf: {e:?}");
+                return Err(anyhow!(e));
+            }
+        };
+        connect_pg(project, cfg, 4, true, &get_zone_cert()).await
     }
 
     pub async fn get_xai_pg(&self) -> Result<Object> {
@@ -210,7 +238,13 @@ impl Db {
         // sa: &ServiceAccountKey,
         isdev: bool,
     ) -> Result<RedisPool> {
-        let cfg = get_redis_conf(project, isdev).await?;
+        let cfg = match get_redis_conf(project, isdev).await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("Db.connect_redis: error getting redis config: {e:?}");
+                return Err(anyhow!(e));
+            }
+        };
 
         let pool = cfg.create_pool(Some(Runtime::Tokio1))?;
 

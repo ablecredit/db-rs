@@ -1,6 +1,6 @@
 [package]
 name = "db"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -11,6 +11,7 @@ deadpool-postgres     = "0"
 deadpool-redis        = { version = "0.14" }
 glob                  = "0"
 google-auth-helper    = { git = "https://github.com/xAmbit-ai/google-auth-helper.git", branch = "main" }
+log                   = "0"
 nimbus                = { git = "https://github.com/xAmbit-ai/nimbus.git", branch = "main" }
 openssl               = "0"
 passwords             = "3"
