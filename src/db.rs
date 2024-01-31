@@ -105,10 +105,10 @@ async fn cert_it(project: &str, b: &mut SslConnectorBuilder, cert: &str) -> Resu
             .get_secret(project, cert.replace(".crt", "").as_str())
             .await?;
 
-        write(crtpth, &secret[..]).await?;
+        write(&crtpth, &secret[..]).await?;
     }
 
-    b.set_ca_file(cert)?;
+    b.set_ca_file(&crtpth)?;
     Ok(())
 }
 
