@@ -9,8 +9,22 @@ use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod};
 use passwords::PasswordGenerator;
 use postgres_openssl::MakeTlsConnector;
 use serde::Serialize;
-use tokio::{fs::write, sync::RwLock, try_join};
+use tokio::{
+    fs::write,
+    sync::{OnceCell, RwLock},
+    try_join,
+};
 use tokio_postgres::{Config as PgConf, NoTls};
+
+static CERT_DIR: OnceCell<tempdir::TempDir> = OnceCell::const_new();
+
+async fn create_cert_dir() -> tempdir::TempDir {
+    tempdir::TempDir::new("x-db").unwrap()
+}
+
+async fn cert_dir() -> &'static Path {
+    CERT_DIR.get_or_init(create_cert_dir).await.path()
+}
 
 pub async fn generate_password(len: usize) -> Result<String> {
     let pwd = PasswordGenerator {
@@ -82,7 +96,8 @@ pub async fn connect_pg(
 }
 
 async fn cert_it(project: &str, b: &mut SslConnectorBuilder, cert: &str) -> Result<()> {
-    if !Path::new(cert).is_file() {
+    let crtpth = cert_dir().await.join(cert);
+    if !crtpth.is_file() {
         let auth = Authenticator::auth().await?;
         let secret_manager = SecretManager::new_with_authenticator(auth).await;
 
@@ -90,8 +105,9 @@ async fn cert_it(project: &str, b: &mut SslConnectorBuilder, cert: &str) -> Resu
             .get_secret(project, cert.replace(".crt", "").as_str())
             .await?;
 
-        write(cert, &secret[..]).await?;
+        write(crtpth, &secret[..]).await?;
     }
+
     b.set_ca_file(cert)?;
     Ok(())
 }
