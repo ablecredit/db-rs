@@ -4,7 +4,10 @@ use anyhow::{anyhow, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool};
 use deadpool_redis::{redis::cmd, Config as RConf, Connection, Pool as RedisPool, Runtime};
 use google_auth_helper::AuthHelper;
-use nimbus::{Authenticator, SecretManager, SecretManagerHelper};
+use nimbus::{
+    yup_oauth2::hyper::{body, header::AUTHORIZATION, Body, Client, Method, Request, StatusCode},
+    Authenticator, HttpConnector, SecretManager, SecretManagerHelper,
+};
 use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod};
 use passwords::PasswordGenerator;
 use postgres_openssl::MakeTlsConnector;
@@ -142,23 +145,23 @@ async fn set_cxn_secret(project: &str, db: &str, cxn: &str) -> Result<()> {
     Ok(())
 }
 
-// async fn get_google_token(a: &str) -> Result<String> {
-//     let gurl = format!("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience={a}");
+async fn get_google_token(a: &str) -> Result<String> {
+    let gurl = format!("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience={a}");
 
-//     let req = Request::builder()
-//         .method(Method::GET)
-//         .uri(gurl)
-//         .header("Metadata-Flavor", "Google")
-//         .body(Body::empty())?;
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(gurl)
+        .header("Metadata-Flavor", "Google")
+        .body(Body::empty())?;
 
-//     let client = Client::new();
-//     let res = client.request(req).await?;
+    let client = Client::new();
+    let res = client.request(req).await?;
 
-//     let body = &body::to_bytes(res.into_body()).await?;
+    let body = &body::to_bytes(res.into_body()).await?;
 
-//     Ok(std::str::from_utf8(body)?.to_string())
-//     // Ok("somerandomtoken".to_string())
-// }
+    Ok(std::str::from_utf8(body)?.to_string())
+    // Ok("somerandomtoken".to_string())
+}
 
 pub struct Db {
     // sa: ServiceAccountKey,
@@ -508,52 +511,52 @@ struct RunMigration {
 
 impl Db {
     async fn run_migration(&self, org: &str) -> Result<()> {
-        // let rb = RunMigration { id: org.to_owned() };
-        // let body = serde_json::to_vec(&rb)?;
+        let rb = RunMigration { id: org.to_owned() };
+        let body = serde_json::to_vec(&rb)?;
 
-        // let mig = if let Some(m) = &self.migrator {
-        //     m.to_owned()
-        // } else {
-        //     return Err(anyhow!("Migrator not initialized"));
-        // };
+        let mig = if let Some(m) = &self.migrator {
+            m.to_owned()
+        } else {
+            return Err(anyhow!("Migrator not initialized"));
+        };
 
-        // let token = if !mig.contains("localhost") {
-        //     get_google_token(&mig).await?
-        // } else {
-        //     String::new()
-        // };
+        let token = if !mig.contains("localhost") {
+            get_google_token(&mig).await?
+        } else {
+            String::new()
+        };
 
-        // let uri = format!("{}/m", &mig);
+        let uri = format!("{}/m", &mig);
 
-        // let req = Request::builder()
-        //     .method(Method::POST)
-        //     .header(AUTHORIZATION, format!("Bearer {token}"))
-        //     .uri(&uri)
-        //     .body(Body::from(body))?;
+        let req = Request::builder()
+            .method(Method::POST)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .uri(&uri)
+            .body(Body::from(body))?;
 
-        // let res = if !&mig.contains("localhost") {
-        //     let client = Client::builder().build(
-        //         hyper_rustls::HttpsConnectorBuilder::new()
-        //             .with_native_roots()
-        //             .https_or_http()
-        //             .enable_http1()
-        //             .enable_http2()
-        //             .build(),
-        //     );
+        let res = if !&mig.contains("localhost") {
+            let client = Client::builder().build(
+                hyper_rustls::HttpsConnectorBuilder::new()
+                    .with_native_roots()
+                    .https_or_http()
+                    .enable_http1()
+                    .enable_http2()
+                    .build(),
+            );
 
-        //     client.request(req).await?
-        // } else {
-        //     let client = Client::builder().build(HttpConnector::new());
+            client.request(req).await?
+        } else {
+            let client = Client::builder().build(HttpConnector::new());
 
-        //     client.request(req).await?
-        // };
+            client.request(req).await?
+        };
 
-        // if res.status() != StatusCode::OK {
-        //     return Err(anyhow!(
-        //         "non-200 response code {} from migrator",
-        //         res.status()
-        //     ));
-        // }
+        if res.status() != StatusCode::OK {
+            return Err(anyhow!(
+                "non-200 response code {} from migrator",
+                res.status()
+            ));
+        }
         unimplemented!("Run migration for Org: [{org}]")
     }
 }
