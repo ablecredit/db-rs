@@ -164,7 +164,7 @@ async fn get_google_token(a: &str) -> Result<String> {
 }
 
 pub struct Db {
-    // sa: ServiceAccountKey,
+    dev: bool,
     xai: PgPool,
     orgpg: Arc<RwLock<HashMap<String, PgPool>>>,
     redis: RedisPool,
@@ -174,7 +174,7 @@ pub struct Db {
 
 impl Db {
     pub async fn new(project: &str) -> Result<Self> {
-        let isdev = if let Ok(x_env) = env::var("X_ENV")
+        let dev = if let Ok(x_env) = env::var("X_ENV")
             && x_env == "prod"
         {
             false
@@ -182,11 +182,11 @@ impl Db {
             true
         };
 
-        info!("Db.new: initializing DB for dev[{isdev}]");
+        info!("Db.new: initializing DB for dev[{dev}]");
 
         let (xai, redis) = match try_join!(
-            Self::connect_xai_pg(project, isdev),
-            Self::connect_redis(project, isdev)
+            Self::connect_xai_pg(project, dev),
+            Self::connect_redis(project, dev)
         ) {
             Ok(d) => d,
             Err(e) => {
@@ -198,6 +198,7 @@ impl Db {
         // create client connection for sentry gRPC here and get session from there
         // and return Ok((true, Session))
         Ok(Self {
+            dev,
             xai,
             orgpg: Arc::new(RwLock::new(HashMap::new())),
             redis,
@@ -208,7 +209,7 @@ impl Db {
 
     pub async fn new_with_migrator(project: &str, migrator: &str) -> Result<Self> {
         // let sa = read_service_account_key(&secret_path).await?;
-        let isdev = if let Ok(x_env) = env::var("X_ENV")
+        let dev = if let Ok(x_env) = env::var("X_ENV")
             && x_env == "prod"
         {
             false
@@ -217,13 +218,14 @@ impl Db {
         };
 
         let (xai, redis) = try_join!(
-            Self::connect_xai_pg(project, isdev),
-            Self::connect_redis(project, isdev)
+            Self::connect_xai_pg(project, dev),
+            Self::connect_redis(project, dev)
         )?;
 
         // create client connection for sentry gRPC here and get session from there
         // and return Ok((true, Session))
         Ok(Self {
+            dev,
             xai,
             orgpg: Arc::new(RwLock::new(HashMap::new())),
             redis,
@@ -278,17 +280,23 @@ impl Db {
             }
         }
 
-        let p = Self::connect_tenant_pg(&self.project, org).await?;
+        let p = Self::connect_tenant_pg(&self.project, org, self.dev).await?;
         let mut l = self.orgpg.write().await;
         l.insert(org.to_owned(), p);
 
         Ok(())
     }
 
-    async fn connect_tenant_pg(project: &str, org: &str) -> Result<PgPool> {
+    async fn connect_tenant_pg(project: &str, org: &str, dev: bool) -> Result<PgPool> {
         let pool = connect_pg(
             project,
-            get_pg_conf(project, org.replace("o-", "db").to_lowercase().as_str()).await?,
+            get_pg_conf(
+                project,
+                org.replace("o-", if dev { "devdb" } else { "db" })
+                    .to_lowercase()
+                    .as_str(),
+            )
+            .await?,
             2,
             true,
             &get_zone_cert(),
@@ -565,7 +573,7 @@ impl Drop for Db {
     fn drop(&mut self) {
         for p in glob::glob("*.crt").unwrap().filter_map(Result::ok) {
             if let Err(e) = remove_file(&p) {
-                println!("Error trying to delete file {}: {e:?}", p.display());
+                error!("Error trying to delete file {}: {e:?}", p.display());
             }
         }
     }
@@ -624,6 +632,17 @@ mod tests {
         let db = Db::new(proj.as_str()).await?;
 
         let _ = db.get_xai_pg().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connect_tenant_pg() -> Result<()> {
+        let proj = env::var("X_PROJECT")?;
+
+        let db = Db::new(proj.as_str()).await?;
+
+        let _ = db.get_tenant_pg("o-01GFZBQ275D9C56014S28TQT1V").await?;
 
         Ok(())
     }
