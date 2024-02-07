@@ -120,13 +120,14 @@ pub async fn get_cxn_secret(project: &str, db: &str) -> Result<String> {
     let auth = Authenticator::auth().await?;
     let secret_manager = SecretManager::new_with_authenticator(auth).await;
 
+    let secret_name = format!("db-cxn-{db}");
     let secret = match secret_manager
-        .get_secret(project, format!("db-cxn-{db}").as_str())
+        .get_secret(project, &secret_name)
         .await
     {
         Ok(s) => s,
         Err(e) => {
-            error!("Db.get_cxn_secret: error trying to compose connection secret: {e:?}");
+            error!("Db.get_cxn_secret: error trying to compose connection secret for db[{secret_name}] project[{project}]: {e:?}");
             return Err(anyhow!(e));
         }
     };
