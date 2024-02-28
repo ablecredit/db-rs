@@ -160,12 +160,16 @@ pub async fn get_cxn_secret(db: &str) -> Result<String> {
 }
 
 async fn set_cxn_secret(db: &str, cxn: &str) -> Result<()> {
-    // let auth = Authenticator::auth().await?;
-    // let sec_mgr = SecretManager::new_with_authenticator(auth).await;
+    let cfg = load_defaults(BehaviorVersion::latest()).await;
+    let client = aws_sdk_secretsmanager::Client::new(&cfg);
 
-    // sec_mgr
-    //     .create_secret(project, format!("db-cxn-{db}").as_str(), cxn)
-    //     .await?;
+    let secret_name = format!("db-cxn-{db}");
+    client
+        .create_secret()
+        .name(&secret_name)
+        .secret_string(cxn)
+        .send()
+        .await?;
 
     Ok(())
 }
@@ -531,21 +535,25 @@ struct RunMigration {
 
 impl Db {
     async fn run_migration(&self, org: &str) -> Result<()> {
-        let rb = RunMigration { id: org.to_owned() };
-        let body = serde_json::to_vec(&rb)?;
+        warn!(
+            "run_migration: for org[{org}] is not implemented yet for migrator[{:?}]",
+            self.migrator
+        );
+        // let rb = RunMigration { id: org.to_owned() };
+        // let body = serde_json::to_vec(&rb)?;
 
-        let mig = if let Some(m) = &self.migrator {
-            m.to_owned()
-        } else {
-            return Err(anyhow!("Migrator not initialized"));
-        };
+        // let mig = if let Some(m) = &self.migrator {
+        //     m.to_owned()
+        // } else {
+        //     return Err(anyhow!("Migrator not initialized"));
+        // };
 
-        let token = if !mig.contains("localhost") {
-            // get_google_token(&mig).await?
-            todo!("run_migration")
-        } else {
-            String::new()
-        };
+        // let token = if !mig.contains("localhost") {
+        //     // get_google_token(&mig).await?
+        //     todo!("run_migration")
+        // } else {
+        //     String::new()
+        // };
 
         // let uri = format!("{}/m", &mig);
 
