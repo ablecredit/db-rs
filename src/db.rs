@@ -1,13 +1,10 @@
 use std::{collections::HashMap, env, fs::remove_file, path::Path, str::FromStr, sync::Arc};
 
 use anyhow::{anyhow, Result};
+use aws_config::{load_defaults, BehaviorVersion};
 use deadpool_postgres::{Manager, ManagerConfig, Object, Pool as PgPool};
 use deadpool_redis::{redis::cmd, Config as RConf, Connection, Pool as RedisPool, Runtime};
-use google_auth_helper::AuthHelper;
-use nimbus::{
-    yup_oauth2::hyper::{body, header::AUTHORIZATION, Body, Client, Method, Request, StatusCode},
-    Authenticator, HttpConnector, SecretManager, SecretManagerHelper,
-};
+
 use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod};
 use passwords::PasswordGenerator;
 use postgres_openssl::MakeTlsConnector;
@@ -47,8 +44,8 @@ pub async fn generate_password(len: usize) -> Result<String> {
     }
 }
 
-pub async fn get_pg_conf(project: &str, db: &str) -> Result<tokio_postgres::Config> {
-    let cxn = match get_cxn_secret(project, db).await {
+pub async fn get_pg_conf(db: &str) -> Result<tokio_postgres::Config> {
+    let cxn = match get_cxn_secret(db).await {
         Ok(cxn) => cxn,
         Err(e) => {
             error!("get_pg_conf: error trying to get connection secret: {e:?}");
@@ -61,9 +58,9 @@ pub async fn get_pg_conf(project: &str, db: &str) -> Result<tokio_postgres::Conf
     )?)
 }
 
-pub async fn get_redis_conf(project: &str, isdev: bool) -> Result<deadpool_redis::Config> {
+pub async fn get_redis_conf(isdev: bool) -> Result<deadpool_redis::Config> {
     let secretname = if isdev { "dev-cache" } else { "cache" };
-    let cxn = match get_cxn_secret(project, secretname).await {
+    let cxn = match get_cxn_secret(secretname).await {
         Ok(cxn) => cxn,
         Err(e) => {
             error!("Db.get_redis_conf: error trying to get redis connection secret: {e:?}");
@@ -75,7 +72,6 @@ pub async fn get_redis_conf(project: &str, isdev: bool) -> Result<deadpool_redis
 }
 
 pub async fn connect_pg(
-    project: &str,
     cfg: tokio_postgres::Config,
     pool_size: usize,
     isroach: bool,
@@ -85,7 +81,7 @@ pub async fn connect_pg(
 
     let mgr = if isroach {
         let mut builder = SslConnector::builder(SslMethod::tls())?;
-        cert_it(project, &mut builder, cert).await?;
+        cert_it(&mut builder, cert).await?;
 
         let connector = MakeTlsConnector::new(builder.build());
         Manager::from_config(cfg, connector, mgr_cfg)
@@ -98,83 +94,114 @@ pub async fn connect_pg(
     Ok(pool)
 }
 
-async fn cert_it(project: &str, b: &mut SslConnectorBuilder, cert: &str) -> Result<()> {
+async fn cert_it(b: &mut SslConnectorBuilder, cert: &str) -> Result<()> {
     let crtpth = cert_dir().await.join(cert);
     if !crtpth.is_file() {
-        let auth = Authenticator::auth().await?;
-        let secret_manager = SecretManager::new_with_authenticator(auth).await;
+        let cfg = load_defaults(BehaviorVersion::latest()).await;
+        let secret_manager = aws_sdk_secretsmanager::Client::new(&cfg);
 
-        let secret = secret_manager
-            .get_secret(project, cert.replace(".crt", "").as_str())
-            .await?;
+        let secret = match secret_manager
+            .get_secret_value()
+            .secret_id(cert.replace(".crt", "").as_str())
+            .send()
+            .await
+        {
+            Ok(res) => {
+                if let Some(s) = res.secret_string() {
+                    s.to_string()
+                } else {
+                    error!("Db.cert_it: no cert: [{cert}]");
+                    return Err(anyhow!("no cert"));
+                }
+            }
+            Err(e) => {
+                error!("cert_it: error trying to get roach data: [{cert}]: {e:?}");
+                return Err(anyhow!("no certificate for [{cert}]"));
+            }
+        };
 
-        write(&crtpth, &secret[..]).await?;
+        write(&crtpth, secret).await?;
     }
+    info!("gets roach cert!");
 
     b.set_ca_file(&crtpth)?;
     Ok(())
 }
 
 // returns the connection string as a secret
-pub async fn get_cxn_secret(project: &str, db: &str) -> Result<String> {
-    let auth = Authenticator::auth().await?;
-    let secret_manager = SecretManager::new_with_authenticator(auth).await;
+pub async fn get_cxn_secret(db: &str) -> Result<String> {
+    // let auth = Authenticator::auth().await?;
+    let cfg = load_defaults(BehaviorVersion::latest()).await;
+    // let cfg = aws_config::defaults(BehaviorVersion::latest()).region("ap-south-1").load().await;
+    let secret_manager = aws_sdk_secretsmanager::Client::new(&cfg);
 
     let secret_name = format!("db-cxn-{db}");
     let secret = match secret_manager
-        .get_secret(project, &secret_name)
+        .get_secret_value()
+        .secret_id(&secret_name)
+        .send()
         .await
     {
-        Ok(s) => s,
+        Ok(s) => {
+            if let Some(secret) = s.secret_string {
+                secret
+            } else {
+                error!("Db.get_cxn_secret: no secret for db[{secret_name}]");
+                return Err(anyhow!("no secret for db"));
+            }
+        }
         Err(e) => {
-            error!("Db.get_cxn_secret: error trying to compose connection secret for db[{secret_name}] project[{project}]: {e:?}");
+            error!("Db.get_cxn_secret: error trying to get connection secret for db[{secret_name}]: {e:?}");
             return Err(anyhow!(e));
         }
     };
 
-    Ok(String::from_utf8(secret)?)
+    Ok(secret)
 }
 
-async fn set_cxn_secret(project: &str, db: &str, cxn: &str) -> Result<()> {
-    let auth = Authenticator::auth().await?;
-    let sec_mgr = SecretManager::new_with_authenticator(auth).await;
+async fn set_cxn_secret(db: &str, cxn: &str) -> Result<()> {
+    let cfg = load_defaults(BehaviorVersion::latest()).await;
+    let client = aws_sdk_secretsmanager::Client::new(&cfg);
 
-    sec_mgr
-        .create_secret(project, format!("db-cxn-{db}").as_str(), cxn)
+    let secret_name = format!("db-cxn-{db}");
+    client
+        .create_secret()
+        .name(&secret_name)
+        .secret_string(cxn)
+        .send()
         .await?;
 
     Ok(())
 }
 
-async fn get_google_token(a: &str) -> Result<String> {
-    let gurl = format!("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience={a}");
+// async fn get_google_token(a: &str) -> Result<String> {
+//     // let gurl = format!("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience={a}");
 
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(gurl)
-        .header("Metadata-Flavor", "Google")
-        .body(Body::empty())?;
+//     // let req = Request::builder()
+//     //     .method(Method::GET)
+//     //     .uri(gurl)
+//     //     .header("Metadata-Flavor", "Google")
+//     //     .body(Body::empty())?;
 
-    let client = Client::new();
-    let res = client.request(req).await?;
+//     // let client = Client::new();
+//     // let res = client.request(req).await?;
 
-    let body = &body::to_bytes(res.into_body()).await?;
+//     // let body = &body::to_bytes(res.into_body()).await?;
 
-    Ok(std::str::from_utf8(body)?.to_string())
-    // Ok("somerandomtoken".to_string())
-}
+//     // Ok(std::str::from_utf8(body)?.to_string())
+//     // Ok("somerandomtoken".to_string())
+// }
 
 pub struct Db {
     dev: bool,
-    xai: PgPool,
+    host: PgPool,
     orgpg: Arc<RwLock<HashMap<String, PgPool>>>,
     redis: RedisPool,
-    project: String,
     migrator: Option<String>,
 }
 
 impl Db {
-    pub async fn new(project: &str) -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         let dev = if let Ok(x_env) = env::var("X_ENV")
             && x_env == "prod"
         {
@@ -185,10 +212,7 @@ impl Db {
 
         info!("Db.new: initializing DB for dev[{dev}]");
 
-        let (xai, redis) = match try_join!(
-            Self::connect_xai_pg(project, dev),
-            Self::connect_redis(project, dev)
-        ) {
+        let (host, redis) = match try_join!(Self::connect_host_pg(dev), Self::connect_redis(dev)) {
             Ok(d) => d,
             Err(e) => {
                 error!("Db.new: error intializing: {e:?}");
@@ -200,15 +224,14 @@ impl Db {
         // and return Ok((true, Session))
         Ok(Self {
             dev,
-            xai,
+            host,
             orgpg: Arc::new(RwLock::new(HashMap::new())),
             redis,
-            project: project.to_owned(),
             migrator: None,
         })
     }
 
-    pub async fn new_with_migrator(project: &str, migrator: &str) -> Result<Self> {
+    pub async fn new_with_migrator(migrator: &str) -> Result<Self> {
         // let sa = read_service_account_key(&secret_path).await?;
         let dev = if let Ok(x_env) = env::var("X_ENV")
             && x_env == "prod"
@@ -218,37 +241,33 @@ impl Db {
             true
         };
 
-        let (xai, redis) = try_join!(
-            Self::connect_xai_pg(project, dev),
-            Self::connect_redis(project, dev)
-        )?;
+        let (host, redis) = try_join!(Self::connect_host_pg(dev), Self::connect_redis(dev))?;
 
         // create client connection for sentry gRPC here and get session from there
         // and return Ok((true, Session))
         Ok(Self {
             dev,
-            xai,
+            host,
             orgpg: Arc::new(RwLock::new(HashMap::new())),
             redis,
-            project: project.to_owned(),
             migrator: Some(migrator.to_owned()),
         })
     }
 
-    async fn connect_xai_pg(project: &str, isdev: bool) -> Result<PgPool> {
-        let db = if isdev { "dev-xai" } else { "xai" };
-        let cfg = match get_pg_conf(project, db).await {
+    async fn connect_host_pg(isdev: bool) -> Result<PgPool> {
+        let db = if isdev { "dev-host" } else { "host" };
+        let cfg = match get_pg_conf(db).await {
             Ok(cfg) => cfg,
             Err(e) => {
                 error!("Db.connect_xai_pg: error getting pg conf: {e:?}");
                 return Err(anyhow!(e));
             }
         };
-        connect_pg(project, cfg, 4, true, &get_zone_cert()).await
+        connect_pg(cfg, 4, true, &get_zone_cert()).await
     }
 
-    pub async fn get_xai_pg(&self) -> Result<Object> {
-        if let Ok(p) = self.xai.get().await {
+    pub async fn host_pg(&self) -> Result<Object> {
+        if let Ok(p) = self.host.get().await {
             Ok(p)
         } else {
             Err(anyhow!("failed to get xai.pg"))
@@ -256,11 +275,10 @@ impl Db {
     }
 
     pub async fn connect_redis(
-        project: &str,
         // sa: &ServiceAccountKey,
         isdev: bool,
     ) -> Result<RedisPool> {
-        let cfg = match get_redis_conf(project, isdev).await {
+        let cfg = match get_redis_conf(isdev).await {
             Ok(cfg) => cfg,
             Err(e) => {
                 error!("Db.connect_redis: error getting redis config: {e:?}");
@@ -281,18 +299,16 @@ impl Db {
             }
         }
 
-        let p = Self::connect_tenant_pg(&self.project, org, self.dev).await?;
+        let p = Self::connect_tenant_pg(org, self.dev).await?;
         let mut l = self.orgpg.write().await;
         l.insert(org.to_owned(), p);
 
         Ok(())
     }
 
-    async fn connect_tenant_pg(project: &str, org: &str, dev: bool) -> Result<PgPool> {
+    async fn connect_tenant_pg(org: &str, dev: bool) -> Result<PgPool> {
         let pool = connect_pg(
-            project,
             get_pg_conf(
-                project,
                 org.replace("o-", if dev { "devdb" } else { "db" })
                     .to_lowercase()
                     .as_str(),
@@ -312,7 +328,7 @@ impl Db {
         Ok(pool)
     }
 
-    pub async fn get_tenant_pg(&self, org: &str) -> Result<Object> {
+    pub async fn tenant_pg(&self, org: &str) -> Result<Object> {
         self.ensure_tenant_db(org).await?;
 
         let db = {
@@ -342,7 +358,7 @@ impl Db {
     // 5. Call migration script to run migration on this database
     // 6. Ensure tenant
     pub async fn new_tenant_db(&self, org: &str, cluster: &str) -> Result<()> {
-        let (conf, cxn) = self.get_cluster_default(&self.project, cluster).await?;
+        let (conf, cxn) = self.get_cluster_default(cluster).await?;
 
         let (usr, pwd) = self.create_db_user(&cxn, org).await?;
         let db = self.create_database(&cxn, org, &usr).await?;
@@ -369,34 +385,33 @@ impl Db {
         let cxnstr: String = format!(
             "postgresql://{usr}:{pwd}@{host}:{port}/{db}?sslmode=verify-full&options={opt}"
         );
-        set_cxn_secret(&self.project, &db, &cxnstr).await?;
+        set_cxn_secret(&db, &cxnstr).await?;
 
         // check if connection is working properly or not
-        let _ = self.get_tenant_pg(org).await?;
+        let _ = self.tenant_pg(org).await?;
         self.run_migration(org).await?;
 
         Ok(())
     }
 
-    async fn get_cluster_default(&self, project: &str, cluster: &str) -> Result<(PgConf, PgPool)> {
-        let auth = Authenticator::auth().await?;
-        let secret = SecretManager::new_with_authenticator(auth)
-            .await
-            .get_secret(
-                project,
-                format!("projects/{project}/secrets/db-cxn-{cluster}-default/versions/latest")
-                    .as_str(),
-            )
+    async fn get_cluster_default(&self, cluster: &str) -> Result<(PgConf, PgPool)> {
+        let cfg = load_defaults(BehaviorVersion::latest()).await;
+        let secret = aws_sdk_secretsmanager::Client::new(&cfg)
+            .get_secret_value()
+            .secret_id(cluster)
+            .send()
             .await?;
 
-        let cxn = String::from_utf8(secret)?;
+        let cxn = if let Some(secret) = secret.secret_string() {
+            secret
+        } else {
+            error!("get_cluster_default: no such secret: [{cluster}]");
+            return Err(anyhow!("no such secret for cluster"));
+        };
 
         let conf = PgConf::from_str(cxn.replace("verify-full", "require").as_str())?;
 
-        Ok((
-            conf.clone(),
-            connect_pg(project, conf, 4, true, "roach.crt").await?,
-        ))
+        Ok((conf.clone(), connect_pg(conf, 4, true, "roach.crt").await?))
     }
 
     async fn create_db_user(&self, pg: &PgPool, org: &str) -> Result<(String, String)> {
@@ -520,52 +535,57 @@ struct RunMigration {
 
 impl Db {
     async fn run_migration(&self, org: &str) -> Result<()> {
-        let rb = RunMigration { id: org.to_owned() };
-        let body = serde_json::to_vec(&rb)?;
+        warn!(
+            "run_migration: for org[{org}] is not implemented yet for migrator[{:?}]",
+            self.migrator
+        );
+        // let rb = RunMigration { id: org.to_owned() };
+        // let body = serde_json::to_vec(&rb)?;
 
-        let mig = if let Some(m) = &self.migrator {
-            m.to_owned()
-        } else {
-            return Err(anyhow!("Migrator not initialized"));
-        };
+        // let mig = if let Some(m) = &self.migrator {
+        //     m.to_owned()
+        // } else {
+        //     return Err(anyhow!("Migrator not initialized"));
+        // };
 
-        let token = if !mig.contains("localhost") {
-            get_google_token(&mig).await?
-        } else {
-            String::new()
-        };
+        // let token = if !mig.contains("localhost") {
+        //     // get_google_token(&mig).await?
+        //     todo!("run_migration")
+        // } else {
+        //     String::new()
+        // };
 
-        let uri = format!("{}/m", &mig);
+        // let uri = format!("{}/m", &mig);
 
-        let req = Request::builder()
-            .method(Method::POST)
-            .header(AUTHORIZATION, format!("Bearer {token}"))
-            .uri(&uri)
-            .body(Body::from(body))?;
+        // let req = Request::builder()
+        //     .method(Method::POST)
+        //     .header(AUTHORIZATION, format!("Bearer {token}"))
+        //     .uri(&uri)
+        //     .body(Body::from(body))?;
 
-        let res = if !&mig.contains("localhost") {
-            let client = Client::builder().build(
-                hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_native_roots()
-                    .https_or_http()
-                    .enable_http1()
-                    .enable_http2()
-                    .build(),
-            );
+        // let res = if !&mig.contains("localhost") {
+        //     let client = Client::builder().build(
+        //         hyper_rustls::HttpsConnectorBuilder::new()
+        //             .with_native_roots()
+        //             .https_or_http()
+        //             .enable_http1()
+        //             .enable_http2()
+        //             .build(),
+        //     );
 
-            client.request(req).await?
-        } else {
-            let client = Client::builder().build(HttpConnector::new());
+        //     client.request(req).await?
+        // } else {
+        //     let client = Client::builder().build(HttpConnector::new());
 
-            client.request(req).await?
-        };
+        //     client.request(req).await?
+        // };
 
-        if res.status() != StatusCode::OK {
-            return Err(anyhow!(
-                "non-200 response code {} from migrator",
-                res.status()
-            ));
-        }
+        // if res.status() != StatusCode::OK {
+        //     return Err(anyhow!(
+        //         "non-200 response code {} from migrator",
+        //         res.status()
+        //     ));
+        // }
         unimplemented!("Run migration for Org: [{org}]")
     }
 }
@@ -603,10 +623,9 @@ mod tests {
 
     #[tokio::test]
     async fn new_tenant_db() -> Result<()> {
-        let proj = env::var("X_PROJECT")?;
-        // let sa_path = env::var("SERVICE_ACCOUNT")?;
+        // let sa_path = env::var("SERVICE_CCOUNT")?;
 
-        let db = Db::new_with_migrator(proj.as_str(), "http://localhost:8080").await?;
+        let db = Db::new_with_migrator("http://localhost:8080").await?;
 
         let neworg = env::var("X_ORG")?;
         let cluster = env::var("X_CLUSTER")?;
@@ -617,9 +636,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_secret() -> Result<()> {
-        let proj = env::var("X_PROJECT")?;
-
-        set_cxn_secret(&proj, "s0m3database", "S0m3S3cr3tMess@g3")
+        set_cxn_secret("s0m3database", "S0m3S3cr3tMess@g3")
             .await
             .unwrap();
 
@@ -627,32 +644,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_xai() -> Result<()> {
-        let proj = env::var("X_PROJECT")?;
+    async fn connect_host() -> Result<()> {
+        pretty_env_logger::init();
+        let db = Db::new().await?;
 
-        let db = Db::new(proj.as_str()).await?;
-
-        let _ = db.get_xai_pg().await?;
+        let _ = db.host_pg().await?;
 
         Ok(())
     }
 
     #[tokio::test]
     async fn connect_tenant_pg() -> Result<()> {
-        let proj = env::var("X_PROJECT")?;
+        let db = Db::new().await?;
 
-        let db = Db::new(proj.as_str()).await?;
-
-        let _ = db.get_tenant_pg("o-01GFZBQ275D9C56014S28TQT1V").await?;
+        let _ = db.tenant_pg("o-01GFZBQ275D9C56014S28TQT1V").await?;
 
         Ok(())
     }
 
     #[tokio::test]
     async fn del_cache() -> Result<()> {
-        let proj = env::var("X_PROJECT")?;
-
-        let db = Db::new(proj.as_str()).await?;
+        let db = Db::new().await?;
 
         let t = db.del_cache("hello").await?;
         println!("DelCache: {t}");
@@ -662,9 +674,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_cache() -> Result<()> {
-        let proj = env::var("X_PROJECT")?;
-
-        let db = Db::new(proj.as_str()).await?;
+        let db = Db::new().await?;
 
         let t = db.get_cache("hello").await?;
         println!("GetCache: {}", String::from_utf8(t).unwrap());
