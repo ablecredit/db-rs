@@ -8,7 +8,6 @@ use deadpool_redis::{redis::cmd, Config as RConf, Connection, Pool as RedisPool,
 use openssl::ssl::{SslConnector, SslConnectorBuilder, SslMethod};
 use passwords::PasswordGenerator;
 use postgres_openssl::MakeTlsConnector;
-use serde::Serialize;
 use tokio::{
     fs::write,
     sync::{OnceCell, RwLock},
@@ -197,18 +196,11 @@ pub struct Db {
     host: PgPool,
     orgpg: Arc<RwLock<HashMap<String, PgPool>>>,
     redis: RedisPool,
-    migrator: Option<String>,
 }
 
 impl Db {
     pub async fn new() -> Result<Self> {
-        let dev = if let Ok(x_env) = env::var("X_ENV")
-            && x_env == "prod"
-        {
-            false
-        } else {
-            true
-        };
+        let dev = !(env::var("X_ENV").map_or(false, |e| e == "prod"));
 
         info!("Db.new: initializing DB for dev[{dev}]");
 
@@ -227,30 +219,6 @@ impl Db {
             host,
             orgpg: Arc::new(RwLock::new(HashMap::new())),
             redis,
-            migrator: None,
-        })
-    }
-
-    pub async fn new_with_migrator(migrator: &str) -> Result<Self> {
-        // let sa = read_service_account_key(&secret_path).await?;
-        let dev = if let Ok(x_env) = env::var("X_ENV")
-            && x_env == "prod"
-        {
-            false
-        } else {
-            true
-        };
-
-        let (host, redis) = try_join!(Self::connect_host_pg(dev), Self::connect_redis(dev))?;
-
-        // create client connection for sentry gRPC here and get session from there
-        // and return Ok((true, Session))
-        Ok(Self {
-            dev,
-            host,
-            orgpg: Arc::new(RwLock::new(HashMap::new())),
-            redis,
-            migrator: Some(migrator.to_owned()),
         })
     }
 
@@ -358,9 +326,16 @@ impl Db {
     // 5. Call migration script to run migration on this database
     // 6. Ensure tenant
     pub async fn new_tenant_db(&self, org: &str, cluster: &str) -> Result<()> {
-        let (conf, cxn) = self.get_cluster_default(cluster).await?;
+        info!("new_tenant_db: called for Org[{org}] /  Cluster[{cluster}]");
 
+        let (conf, cxn) = self.get_cluster_default(cluster).await?;
         let (usr, pwd) = self.create_db_user(&cxn, org).await?;
+
+        info!(
+            "Org[{org}] / User[{usr}] / Pwd[{}]",
+            pwd.chars().map(|_| '*').collect::<String>()
+        );
+
         let db = self.create_database(&cxn, org, &usr).await?;
 
         let port = conf.get_ports()[0];
@@ -389,7 +364,6 @@ impl Db {
 
         // check if connection is working properly or not
         let _ = self.tenant_pg(org).await?;
-        self.run_migration(org).await?;
 
         Ok(())
     }
@@ -411,16 +385,23 @@ impl Db {
 
         let conf = PgConf::from_str(cxn.replace("verify-full", "require").as_str())?;
 
-        Ok((conf.clone(), connect_pg(conf, 4, true, "roach.crt").await?))
+        Ok((
+            conf.clone(),
+            connect_pg(conf, 4, true, get_zone_cert()).await?,
+        ))
     }
 
     async fn create_db_user(&self, pg: &PgPool, org: &str) -> Result<(String, String)> {
+        info!("create_db_user: for Org[{org}]");
+
         let ext = generate_password(4).await?;
         let usr = format!("{}_{ext}", org.replace("o-", "adm1n_").to_lowercase());
         let pwd = generate_password(22).await?;
 
         let pg = pg.get().await?;
         let qry = format!("CREATE USER {usr} WITH PASSWORD '{pwd}'");
+
+        info!("create_db_user: database User[{usr}] created for Org[{org}]");
 
         let stmt = pg.prepare(&qry).await?;
 
@@ -430,7 +411,12 @@ impl Db {
     }
 
     async fn create_database(&self, pg: &PgPool, org: &str, owner: &str) -> Result<String> {
-        let db = org.replace("o-", "db").to_lowercase();
+        info!("create_database: called for Org[{org}] / Owner[{owner}]");
+
+        let db = org
+            .replace("o-", if self.dev { "devdb" } else { "db" })
+            .to_lowercase();
+        info!("create_database: database_name[{db}]");
 
         let pg = pg.get().await?;
         let qry = format!("CREATE DATABASE {db} OWNER {owner}");
@@ -528,68 +514,6 @@ impl Db {
     }
 }
 
-#[derive(Serialize)]
-struct RunMigration {
-    id: String,
-}
-
-impl Db {
-    async fn run_migration(&self, org: &str) -> Result<()> {
-        warn!(
-            "run_migration: for org[{org}] is not implemented yet for migrator[{:?}]",
-            self.migrator
-        );
-        // let rb = RunMigration { id: org.to_owned() };
-        // let body = serde_json::to_vec(&rb)?;
-
-        // let mig = if let Some(m) = &self.migrator {
-        //     m.to_owned()
-        // } else {
-        //     return Err(anyhow!("Migrator not initialized"));
-        // };
-
-        // let token = if !mig.contains("localhost") {
-        //     // get_google_token(&mig).await?
-        //     todo!("run_migration")
-        // } else {
-        //     String::new()
-        // };
-
-        // let uri = format!("{}/m", &mig);
-
-        // let req = Request::builder()
-        //     .method(Method::POST)
-        //     .header(AUTHORIZATION, format!("Bearer {token}"))
-        //     .uri(&uri)
-        //     .body(Body::from(body))?;
-
-        // let res = if !&mig.contains("localhost") {
-        //     let client = Client::builder().build(
-        //         hyper_rustls::HttpsConnectorBuilder::new()
-        //             .with_native_roots()
-        //             .https_or_http()
-        //             .enable_http1()
-        //             .enable_http2()
-        //             .build(),
-        //     );
-
-        //     client.request(req).await?
-        // } else {
-        //     let client = Client::builder().build(HttpConnector::new());
-
-        //     client.request(req).await?
-        // };
-
-        // if res.status() != StatusCode::OK {
-        //     return Err(anyhow!(
-        //         "non-200 response code {} from migrator",
-        //         res.status()
-        //     ));
-        // }
-        unimplemented!("Run migration for Org: [{org}]")
-    }
-}
-
 impl Drop for Db {
     fn drop(&mut self) {
         for p in glob::glob("*.crt").unwrap().filter_map(Result::ok) {
@@ -600,14 +524,14 @@ impl Drop for Db {
     }
 }
 
-fn get_zone_cert() -> String {
-    if let Ok(e) = env::var("X_ENV")
-        && e == "prod"
-    {
-        "roach.crt".to_string()
-    } else {
-        "dev-roach.crt".to_string()
-    }
+fn get_zone_cert() -> &'static str {
+    env::var("X_ENV").map_or("dev-roach.crt", |e| {
+        if e == "prod" {
+            "roach.crt"
+        } else {
+            "dev-roach.crt"
+        }
+    })
 }
 
 #[cfg(test)]
@@ -623,9 +547,11 @@ mod tests {
 
     #[tokio::test]
     async fn new_tenant_db() -> Result<()> {
-        // let sa_path = env::var("SERVICE_CCOUNT")?;
+        pretty_env_logger::init();
 
-        let db = Db::new_with_migrator("http://localhost:8080").await?;
+        println!("new_tenant_db_test: initializing ...");
+        let db = Db::new().await?;
+        println!("new_tenant_db_test: initialized ...");
 
         let neworg = env::var("X_ORG")?;
         let cluster = env::var("X_CLUSTER")?;
