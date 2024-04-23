@@ -231,7 +231,7 @@ impl Db {
                 return Err(anyhow!(e));
             }
         };
-        connect_pg(cfg, 4, true, &get_zone_cert()).await
+        connect_pg(cfg, 4, true, get_zone_cert()).await
     }
 
     pub async fn host_pg(&self) -> Result<Object> {
@@ -284,7 +284,7 @@ impl Db {
             .await?,
             2,
             true,
-            &get_zone_cert(),
+            get_zone_cert(),
         )
         .await?;
 
